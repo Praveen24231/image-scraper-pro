@@ -358,40 +358,57 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
         if new_height == last_height and i > 4: break
         last_height = new_height
 
+def fast_static_fetch(target_url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    try:
+        with httpx.Client(follow_redirects=True, timeout=10.0) as client:
+            res = client.get(target_url, headers=headers)
+            return res.text
+    except Exception as e:
+        print(f"[fast_static_fetch] Warning: static fetch failed: {e}")
+        return ""
+
 async def scrape_images(url, autoscroll=True):
-    async with async_playwright() as p:
-        # Use a real-looking user agent
-        browser = await p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        page = await context.new_page()
-        
-        accumulated_data = set() # Store (url, alt) tuples
-        
-        try:
-            print(f"Scraping URL: {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+    # 1. Always attempt fast static fetch first (instant & low memory)
+    content = fast_static_fetch(url)
+    
+    # 2. Attempt Playwright DOM extraction if available
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            accumulated_data = set()
             
-            # Initial wait
-            await asyncio.sleep(1.0)
-            
-            if autoscroll:
-                await auto_scroll(page, accumulated_data, max_scrolls=8, max_seconds=8)
-            else:
-                await page.evaluate("window.scrollTo(0, 800)") 
+            try:
+                print(f"Scraping URL with Playwright: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
                 await asyncio.sleep(1.0)
-        except Exception as e:
-            print(f"Page load/scroll failed: {e}")
+                
+                if autoscroll:
+                    await auto_scroll(page, accumulated_data, max_scrolls=5, max_seconds=6)
+                else:
+                    await page.evaluate("window.scrollTo(0, 800)") 
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Playwright navigation warning: {e}")
+            
+            pw_content = await page.content()
+            if pw_content:
+                content = pw_content + "\n" + content
+            await browser.close()
+    except Exception as e:
+        print(f"Playwright launch warning (falling back to static extraction): {e}")
         
-        # Final extraction from DOM content
-        content = await page.content()
-        await browser.close()
-        
-        soup = BeautifulSoup(content, 'html.parser')
+    soup = BeautifulSoup(content, 'html.parser')
         images = []
         seen_urls = set()
 
