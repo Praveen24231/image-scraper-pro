@@ -292,24 +292,25 @@ def api_count():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-async def auto_scroll(page, accumulation_set, max_scrolls=40, max_seconds=22):
+async def auto_scroll(page, accumulation_set, max_scrolls=120, max_seconds=60):
     start_time = asyncio.get_event_loop().time()
     
     for i in range(max_scrolls):
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > max_seconds:
-            print(f"[auto_scroll] Time limit reached ({elapsed:.1f}s), finishing scroll.")
+            print(f"[auto_scroll] Time limit reached ({elapsed:.1f}s), finishing scroll with {len(accumulation_set)} items accumulated.")
             break
 
         current_data = await page.evaluate("""
             () => {
                 const results = [];
-                const links = document.querySelectorAll('a[href*="img_url="], a.ImagesContentImage-Cover, a.serp-item__link');
+                // 1. Search for Yandex / image search result links with img_url parameters
+                const links = document.querySelectorAll('a[href*="img_url="], a[href*="url="], a.ImagesContentImage-Cover, a.serp-item__link, a.serp-item__item');
                 links.forEach(a => {
                     let highRes = null;
                     try {
                         const urlParams = new URL(a.href, window.location.origin).searchParams;
-                        highRes = urlParams.get('img_url');
+                        highRes = urlParams.get('img_url') || urlParams.get('url');
                     } catch(e) {}
                     const img = a.querySelector('img');
                     if (img || highRes) {
@@ -321,18 +322,38 @@ async def auto_scroll(page, accumulation_set, max_scrolls=40, max_seconds=22):
                     }
                 });
 
+                // 2. Search for all standard and lazy-loaded image elements
                 const allImgs = document.querySelectorAll('img');
                 allImgs.forEach(img => {
-                    const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original');
+                    const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src') || img.getAttribute('data-large-img');
                     if (src) {
                         results.push({ url: src, alt: img.alt || "", isHighRes: false });
                     }
+                    
+                    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+                    if (srcset) {
+                        const parts = srcset.split(',');
+                        parts.forEach(p => {
+                            const candidate = p.trim().split(' ')[0];
+                            if (candidate) results.push({ url: candidate, alt: img.alt || "", isHighRes: false });
+                        });
+                    }
                 });
 
-                // Fast instant JS click for "Show More" button
-                const moreBtn = document.querySelector('button.FetchListButton-Button, .FetchListButton-Button, .more-button, .serp-list__more, a.more');
-                if (moreBtn && moreBtn.offsetHeight > 0) {
-                    try { moreBtn.click(); } catch(e) {}
+                // 3. Fast instant JS click for "Show More" / "Fetch List" / pagination buttons
+                const selectors = [
+                    'button.FetchListButton-Button', '.FetchListButton-Button',
+                    '.more-button', '.serp-list__more', 'a.more', '.Button2_type_submit',
+                    '.serp-list__button', 'button[class*="more"]', 'button[class*="More"]',
+                    'a[class*="more"]', 'a[class*="More"]', '[data-test-id*="more"]'
+                ];
+                for (const sel of selectors) {
+                    const btns = document.querySelectorAll(sel);
+                    btns.forEach(b => {
+                        if (b && b.offsetHeight > 0) {
+                            try { b.click(); } catch(e) {}
+                        }
+                    });
                 }
 
                 return results;
@@ -345,8 +366,14 @@ async def auto_scroll(page, accumulation_set, max_scrolls=40, max_seconds=22):
                 norm_url = normalize_url(url)
                 accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
 
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 5.0)")
-        await asyncio.sleep(0.18)
+        # Scroll to force infinite loading triggers
+        await page.evaluate("""
+            () => {
+                const scrollHeight = document.body.scrollHeight;
+                window.scrollBy(0, Math.max(window.innerHeight * 8.0, 1500));
+            }
+        """)
+        await asyncio.sleep(0.25)
 
 def fast_static_fetch(target_url):
     headers = {
@@ -354,7 +381,7 @@ def fast_static_fetch(target_url):
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     }
     try:
-        with httpx.Client(follow_redirects=True, timeout=10.0) as client:
+        with httpx.Client(follow_redirects=True, timeout=12.0) as client:
             res = client.get(target_url, headers=headers)
             return res.text
     except Exception as e:
@@ -380,13 +407,13 @@ async def scrape_images(url, autoscroll=True):
             
             try:
                 print(f"Scraping URL with Playwright: {url}")
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(1.5)
                 
                 if autoscroll:
-                    await auto_scroll(page, accumulated_data, max_scrolls=30, max_seconds=22)
+                    await auto_scroll(page, accumulated_data, max_scrolls=120, max_seconds=60)
                 else:
-                    await page.evaluate("window.scrollTo(0, 800)") 
+                    await page.evaluate("window.scrollTo(0, 1200)") 
                     await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"Playwright navigation warning: {e}")
