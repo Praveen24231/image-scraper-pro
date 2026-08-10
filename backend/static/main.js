@@ -101,7 +101,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Helper to get fully qualified API URL
     function getApiUrl(endpoint) {
         let base = backendUrlInput.value.trim().replace(/\/+$/, '');
-        if (!base) base = DEFAULT_BACKEND_URL;
+        // Force fallback to Render backend if empty or pointing to frontend domain
+        if (!base || base.includes('vercel.app') || base.includes('localhost') || base.includes('127.0.0.1')) {
+            base = DEFAULT_BACKEND_URL;
+            backendUrlInput.value = DEFAULT_BACKEND_URL;
+            localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
+        }
         return `${base}${endpoint}`;
     }
     
@@ -302,6 +307,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, autoscroll })
             });
+
+            if (!response.ok) {
+                const rawText = await response.text();
+                throw new Error(`Backend server error (${response.status}). Please check API URL.`);
+            }
+
             const data = await response.json();
             if (data.error) throw new Error(data.error);
 
