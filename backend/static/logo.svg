@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 240" width="100%" height="100%">
+  <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <!-- P Monogram Loop -->
+    <path d="M 90,30 L 90,125" />
+    <path d="M 90,30 L 160,30 C 190,30 190,75 160,75 L 122,75 L 122,112" />
+    
+    <!-- D Monogram Loop -->
+    <path d="M 105,48 L 105,145 L 155,145 C 205,145 205,48 155,48 Z" stroke-width="7.5" />
+  </g>
+  
+  <!-- Text Labels -->
+  <text x="150" y="185" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="800" font-size="28" letter-spacing="4" fill="currentColor">PRAVEEN</text>
+  <text x="150" y="215" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="400" font-size="16" letter-spacing="9" fill="currentColor" opacity="0.85">DANIEL</text>
+</svg>
