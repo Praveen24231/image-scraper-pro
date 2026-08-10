@@ -470,6 +470,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             (img.height && img.height !== 'Original' && img.height > 1000);
             const isOriginal = (hasOrig || isLarge);
 
+            const displayUrl = img.thumb || img.url;
             const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
 
             card.innerHTML = `
@@ -478,7 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <i data-lucide="check"></i>
                 </div>
                 
-                <img src="${img.url}" onerror="this.onerror=null;this.src='${proxyUrl}';" alt="${img.alt || 'Image'}" loading="lazy">
+                <img src="${displayUrl}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='${proxyUrl}';" alt="${img.alt || 'Image'}" loading="lazy">
                 
                 <div class="card-overlay">
                     <span class="badge ${isOriginal ? 'badge-orig' : 'badge-hq'}">

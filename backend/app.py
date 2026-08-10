@@ -403,28 +403,33 @@ async def scrape_images(url, autoscroll=True):
     seen_urls = set()
 
     # Helper to add image if unique and high quality
-    def add_img(url, alt, w=0, h=0):
+    def add_img(url, alt, w=0, h=0, thumb=None):
         if not url or url.startswith('data:'): return
         
+        # Upgrade http:// to https:// to prevent Mixed Content browser blocking
+        if url.startswith('http://'):
+            url = 'https://' + url[7:]
+        if thumb and thumb.startswith('http://'):
+            thumb = 'https://' + thumb[7:]
+            
         # Skip SVGs, web icons, tracking pixels, or standard small logos
         if url.split('?')[0].endswith('.svg') or any(k in url.lower() for k in ['favicon', '/tracker', 'pixel.gif', 'doubleclick', 'google-analytics', 'yandex.ru/metrika', 'logo', 'spinner', 'icon']):
             return
             
         url = normalize_url(url)
         
-        # Try to convert w/h to int
         try:
             w_val = int(w) if w and w != 'Original' else 0
             h_val = int(h) if h and h != 'Original' else 0
         except:
             w_val, h_val = 0, 0
 
-        # Deduplication: if we already have this URL, don't add again
         if url in seen_urls: return
         seen_urls.add(url)
         
         images.append({
             'url': url, 
+            'thumb': thumb or url,
             'alt': alt, 
             'width': w_val or 'Original', 
             'height': h_val or 'Original',
@@ -455,10 +460,12 @@ async def scrape_images(url, autoscroll=True):
             try:
                 orig_match = re.search(r'"origUrl":"(.*?)"', chunk)
                 dups_match = re.search(r'"dups":\[(.*?)]', chunk)
+                thumb_match = re.search(r'"thumbUrl":"(.*?)"', chunk) or re.search(r'"url":"(.*?avatars\.mds\.yandex\.net.*?)"', chunk)
                 w_match = re.search(r'"width":(\d+)', chunk)
                 h_match = re.search(r'"height":(\d+)', chunk)
                 
                 current_best_url = None
+                current_thumb = thumb_match.group(1).replace('\\/', '/') if thumb_match else None
                 current_w = int(w_match.group(1)) if w_match else 0
                 current_h = int(h_match.group(1)) if h_match else 0
                 
@@ -478,16 +485,16 @@ async def scrape_images(url, autoscroll=True):
                     current_best_url = normalize_url(current_best_url)
                     
                     if img_id not in best_images:
-                        best_images[img_id] = {'url': current_best_url, 'w': current_w, 'h': current_h}
+                        best_images[img_id] = {'url': current_best_url, 'thumb': current_thumb, 'w': current_w, 'h': current_h}
                     else:
                         old = best_images[img_id]
                         if (current_w * current_h) > (old['w'] * old['h']):
-                            best_images[img_id] = {'url': current_best_url, 'w': current_w, 'h': current_h}
+                            best_images[img_id] = {'url': current_best_url, 'thumb': current_thumb, 'w': current_w, 'h': current_h}
             except: continue
 
     # Add the best versions found from metadata
     for img_id, data in best_images.items():
-        add_img(data['url'], 'Highest Quality Asset', data['w'], data['h'])
+        add_img(data['url'], 'Highest Quality Asset', data['w'], data['h'], thumb=data.get('thumb'))
     
     print(f"Extracted {len(best_images)} unique high-res images from metadata.")
 
@@ -572,27 +579,26 @@ def api_proxy_download():
         return jsonify({'error': 'URL is required'}), 400
     
     try:
-        # URL encode to avoid unicode header issues
+        if url.startswith('http://'):
+            url = 'https://' + url[7:]
+            
         ascii_url = requote_uri(url)
-        # Fetch the image through the backend to bypass CORS
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Referer': ascii_url
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         }
-        response = requests.get(ascii_url, headers=headers, timeout=15, stream=True)
+        response = requests.get(ascii_url, headers=headers, timeout=12, stream=True)
         response.raise_for_status()
         
-        # Determine content type and suggested filename
         content_type = response.headers.get('Content-Type', 'image/jpeg')
-        
         return send_file(
             io.BytesIO(response.content),
             mimetype=content_type,
-            as_attachment=False # Browser will handle download with its own filename or our 'a' tag attribute
+            as_attachment=False
         )
     except Exception as e:
         print(f"Proxy download failed for {url}: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 404
 
 @app.route('/api/download', methods=['POST'])
 def api_download():
