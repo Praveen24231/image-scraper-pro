@@ -409,179 +409,156 @@ async def scrape_images(url, autoscroll=True):
         print(f"Playwright launch warning (falling back to static extraction): {e}")
         
     soup = BeautifulSoup(content, 'html.parser')
-        images = []
-        seen_urls = set()
+    images = []
+    seen_urls = set()
 
-        # Helper to add image if unique and high quality
-        def add_img(url, alt, w=0, h=0):
-            if not url or url.startswith('data:'): return
+    # Helper to add image if unique and high quality
+    def add_img(url, alt, w=0, h=0):
+        if not url or url.startswith('data:'): return
+        
+        # Skip low-res Yandex search grid thumbnails
+        if 'avatars.mds.yandex.net' in url and '/i?id=' in url:
+            return
             
-            # Skip low-res Yandex search grid thumbnails
-            if 'avatars.mds.yandex.net' in url and '/i?id=' in url:
-                return
-                
-            # Skip SVGs, web icons, tracking pixels, or standard small logos
-            if url.split('?')[0].endswith('.svg') or any(k in url.lower() for k in ['favicon', '/tracker', 'pixel.gif', 'doubleclick', 'google-analytics', 'yandex.ru/metrika', 'logo', 'spinner', 'icon']):
-                return
-                
-            url = normalize_url(url)
+        # Skip SVGs, web icons, tracking pixels, or standard small logos
+        if url.split('?')[0].endswith('.svg') or any(k in url.lower() for k in ['favicon', '/tracker', 'pixel.gif', 'doubleclick', 'google-analytics', 'yandex.ru/metrika', 'logo', 'spinner', 'icon']):
+            return
             
-            # Try to convert w/h to int
+        url = normalize_url(url)
+        
+        # Try to convert w/h to int
+        try:
+            w_val = int(w) if w and w != 'Original' else 0
+            h_val = int(h) if h and h != 'Original' else 0
+        except:
+            w_val, h_val = 0, 0
+
+        # Deduplication: if we already have this URL, don't add again
+        if url in seen_urls: return
+        seen_urls.add(url)
+        
+        images.append({
+            'url': url, 
+            'alt': alt, 
+            'width': w_val or 'Original', 
+            'height': h_val or 'Original',
+            'area': w_val * h_val
+        })
+
+    # --- Yandex Metadata Extraction (Highest Resolution) ---
+    import html
+    import json
+    
+    # Dictionary to store best version of each image ID: {id: {url, w, h, alt}}
+    best_images = {}
+
+    # 1. Search for JSON-like objects in the content (often entity encoded)
+    for is_encoded in [True, False]:
+        q = '&quot;' if is_encoded else '"'
+        pattern = rf'{q}id{q}\s*:\s*{q}([a-f0-9]{{32}}){q}.*?({q}origUrl{q}|{q}dups{q})'
+        matches = re.finditer(pattern, content)
+        
+        for match in matches:
+            img_id = match.group(1)
+            start_pos = match.start()
+            chunk = content[start_pos:start_pos+5000]
+            
+            if is_encoded:
+                chunk = html.unescape(chunk)
+            
             try:
-                w_val = int(w) if w and w != 'Original' else 0
-                h_val = int(h) if h and h != 'Original' else 0
-            except:
-                w_val, h_val = 0, 0
-
-            # Deduplication: if we already have this URL, don't add again
-            if url in seen_urls: return
-            seen_urls.add(url)
-            
-            images.append({
-                'url': url, 
-                'alt': alt, 
-                'width': w_val or 'Original', 
-                'height': h_val or 'Original',
-                'area': w_val * h_val
-            })
-
-        # --- Yandex Metadata Extraction (Highest Resolution) ---
-        import html
-        import json
-        
-        # Dictionary to store best version of each image ID: {id: {url, w, h, alt}}
-        best_images = {}
-
-        # 1. Search for JSON-like objects in the content (often entity encoded)
-        # We look for "id":"..." and "origUrl":"..." or "dups":[...]
-        # Pattern to find items that look like image metadata objects
-        # They usually start with {"id":"..." or &quot;id&quot;:&quot;...
-        
-        # Try both encoded and unencoded
-        for is_encoded in [True, False]:
-            q = '&quot;' if is_encoded else '"'
-            # Look for ID and then either origUrl or dups within a reasonable range
-            # Yandex items are usually within a few thousand characters
-            pattern = rf'{q}id{q}\s*:\s*{q}([a-f0-9]{{32}}){q}.*?({q}origUrl{q}|{q}dups{q})'
-            matches = re.finditer(pattern, content)
-            
-            for match in matches:
-                img_id = match.group(1)
-                start_pos = match.start()
-                # Find the boundaries of this object (approximate)
-                # Usually it's inside {...}
-                # We'll take a chunk and try to find the complete JSON
-                chunk = content[start_pos:start_pos+5000]
+                orig_match = re.search(r'"origUrl":"(.*?)"', chunk)
+                dups_match = re.search(r'"dups":\[(.*?)]', chunk)
+                w_match = re.search(r'"width":(\d+)', chunk)
+                h_match = re.search(r'"height":(\d+)', chunk)
                 
-                # Unescape if needed
-                if is_encoded:
-                    chunk = html.unescape(chunk)
+                current_best_url = None
+                current_w = int(w_match.group(1)) if w_match else 0
+                current_h = int(h_match.group(1)) if h_match else 0
                 
-                # Try to find a valid JSON object starting from {
-                # Since we started at "id", let's backtrack to find {
-                # Or just construct a minimal JSON if we can find the keys
+                if orig_match:
+                    current_best_url = orig_match.group(1).replace('\\/', '/')
+                elif dups_match:
+                    try:
+                        dups_json = json.loads("[" + dups_match.group(1) + "]")
+                        if dups_json:
+                            best_dup = max(dups_json, key=lambda x: x.get('w', 0) * x.get('h', 0))
+                            current_best_url = best_dup.get('url')
+                            current_w = max(current_w, best_dup.get('w', 0))
+                            current_h = max(current_h, best_dup.get('h', 0))
+                    except: pass
                 
-                try:
-                    # Simple extraction: find origUrl and dimensions directly if JSON parsing is too hard
-                    orig_match = re.search(r'"origUrl":"(.*?)"', chunk)
-                    dups_match = re.search(r'"dups":\[(.*?)]', chunk)
-                    w_match = re.search(r'"width":(\d+)', chunk)
-                    h_match = re.search(r'"height":(\d+)', chunk)
+                if current_best_url:
+                    current_best_url = normalize_url(current_best_url)
                     
-                    current_best_url = None
-                    current_w = int(w_match.group(1)) if w_match else 0
-                    current_h = int(h_match.group(1)) if h_match else 0
-                    
-                    if orig_match:
-                        current_best_url = orig_match.group(1).replace('\\/', '/')
-                    elif dups_match:
-                        try:
-                            dups_json = json.loads("[" + dups_match.group(1) + "]")
-                            if dups_json:
-                                best_dup = max(dups_json, key=lambda x: x.get('w', 0) * x.get('h', 0))
-                                current_best_url = best_dup.get('url')
-                                current_w = max(current_w, best_dup.get('w', 0))
-                                current_h = max(current_h, best_dup.get('h', 0))
-                        except: pass
-                    
-                    if current_best_url:
-                        # Normalize early
-                        current_best_url = normalize_url(current_best_url)
-                        
-                        if img_id not in best_images:
+                    if img_id not in best_images:
+                        best_images[img_id] = {'url': current_best_url, 'w': current_w, 'h': current_h}
+                    else:
+                        old = best_images[img_id]
+                        if (current_w * current_h) > (old['w'] * old['h']):
                             best_images[img_id] = {'url': current_best_url, 'w': current_w, 'h': current_h}
-                        else:
-                            # Keep the one with larger area
-                            old = best_images[img_id]
-                            if (current_w * current_h) > (old['w'] * old['h']):
-                                best_images[img_id] = {'url': current_best_url, 'w': current_w, 'h': current_h}
-                except: continue
+            except: continue
 
-        # Add the best versions found from metadata
-        for img_id, data in best_images.items():
-            add_img(data['url'], 'Highest Quality Asset', data['w'], data['h'])
-        
-        print(f"Extracted {len(best_images)} unique high-res images from metadata.")
+    # Add the best versions found from metadata
+    for img_id, data in best_images.items():
+        add_img(data['url'], 'Highest Quality Asset', data['w'], data['h'])
+    
+    print(f"Extracted {len(best_images)} unique high-res images from metadata.")
 
-        # 0. Check the target URL itself for a source image (CBIR)
+    # 0. Check the target URL itself for a source image (CBIR)
+    try:
+        parsed_target = urlparse(url)
+        target_qs = parse_qs(parsed_target.query)
+        img_url_vals = target_qs.get('img_url') or target_qs.get('url') or []
+        source_search_url = img_url_vals[0] if img_url_vals else None
+        if source_search_url:
+            add_img(unquote(source_search_url), 'Search Source (Original)')
+    except: pass
+
+    # 0.1 Specifically look for CBIR/Source image in DOM
+    try:
+        source_link = soup.find('a', class_='CbirItem-Link') or soup.find('a', class_='CbirHeader-Image')
+        if source_link:
+            href = source_link.get('href')
+            if href and 'img_url=' in href:
+                src = parse_qs(urlparse(href).query).get('img_url', [None])[0]
+                if src: add_img(unquote(src), 'Source Image (High Res)')
+            else:
+                img = source_link.find('img')
+                if img: add_img(img.get('src'), 'Source Image')
+    except: pass
+
+    # 1. Process accumulated images (captured during scroll)
+    for data in list(accumulated_data):
+        img_u, alt = data[0], data[1]
+        if 'avatars.mds.yandex.net' in img_u and '/i?id=' in img_u:
+            continue
+        add_img(img_u, alt)
+
+    # 2. Extract from final DOM (BS4) - especially links
+    for link in soup.find_all('a', class_=['ImagesContentImage-Cover', 'serp-item__link', 'serp-item__item']):
         try:
-            parsed_target = urlparse(url)
-            target_qs = parse_qs(parsed_target.query)
-            img_url_vals = target_qs.get('img_url') or target_qs.get('url') or []
-            source_search_url = img_url_vals[0] if img_url_vals else None
-            if source_search_url:
-                add_img(unquote(source_search_url), 'Search Source (Original)')
+            href = link.get('href')
+            if href and 'img_url=' in href:
+                img_url = parse_qs(urlparse(href).query).get('img_url', [None])[0]
+                if img_url:
+                    add_img(unquote(img_url), 'High Res Asset')
         except: pass
 
-        # 0.1 Specifically look for CBIR/Source image in DOM
-        try:
-            source_link = soup.find('a', class_='CbirItem-Link') or soup.find('a', class_='CbirHeader-Image')
-            if source_link:
-                href = source_link.get('href')
-                if href and 'img_url=' in href:
-                    src = parse_qs(urlparse(href).query).get('img_url', [None])[0]
-                    if src: add_img(unquote(src), 'Source Image (High Res)')
-                else:
-                    img = source_link.find('img')
-                    if img: add_img(img.get('src'), 'Source Image')
-        except: pass
-
-        # 1. Process accumulated images (captured during scroll)
-        # These are usually links with img_url params
-        for data in list(accumulated_data):
-            url, alt = data[0], data[1]
-            # Skip low-res Yandex thumbnails captured during scrolling
-            if 'avatars.mds.yandex.net' in url and '/i?id=' in url:
-                continue
-            add_img(url, alt)
-
-        # 2. Extract from final DOM (BS4) - especially links
-        for link in soup.find_all('a', class_=['ImagesContentImage-Cover', 'serp-item__link', 'serp-item__item']):
-            try:
-                href = link.get('href')
-                if href and 'img_url=' in href:
-                    img_url = parse_qs(urlparse(href).query).get('img_url', [None])[0]
-                    if img_url:
-                        add_img(unquote(img_url), 'High Res Asset')
-            except: pass
-
-        # 3. Fallback: all images (Filter out small ones if possible)
-        for img in soup.find_all('img'):
-            src = img.get('src') or img.get('data-src') or img.get('data-original')
-            if not src: continue
-            
-            # Skip common UI icons or very small thumbnails
-            if 'icon' in src.lower() or 'logo' in src.lower() or 'spinner' in src.lower(): continue
-            
-            # If it's a Yandex thumbnail, we prefer the metadata version
-            if 'avatars.mds.yandex.net' in src and '/i?id=' in src:
-                # Skip thumbnail fallbacks since we extract high-res equivalents from metadata
-                continue
-                
-            add_img(src, img.get('alt', ''))
+    # 3. Fallback: all images
+    for img in soup.find_all('img'):
+        src = img.get('src') or img.get('data-src') or img.get('data-original')
+        if not src: continue
         
-        print(f"Total unique images found: {len(images)}")
-        return images
+        if 'icon' in src.lower() or 'logo' in src.lower() or 'spinner' in src.lower(): continue
+        
+        if 'avatars.mds.yandex.net' in src and '/i?id=' in src:
+            continue
+            
+        add_img(src, img.get('alt', ''))
+    
+    print(f"Total unique images found: {len(images)}")
+    return images
 
 @app.route('/')
 def index():
