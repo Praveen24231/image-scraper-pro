@@ -292,15 +292,21 @@ def api_count():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-async def auto_scroll(page, accumulation_set, max_scrolls=15):
+async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
+    start_time = asyncio.get_event_loop().time()
     last_height = await page.evaluate("document.body.scrollHeight")
     
     for i in range(max_scrolls):
+        # Time budget guard: ensure total scroll execution never exceeds max_seconds
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > max_seconds:
+            print(f"[auto_scroll] Time limit reached ({elapsed:.1f}s), finishing scroll.")
+            break
+
         # JS evaluation to find both thumbnails and high-res links
         current_data = await page.evaluate("""
             () => {
                 const results = [];
-                // Target links that usually wrap gallery images
                 const links = document.querySelectorAll('a[href*="img_url="], a.ImagesContentImage-Cover, a.serp-item__link');
                 links.forEach(a => {
                     let highRes = null;
@@ -318,7 +324,6 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15):
                     }
                 });
 
-                // Also get all images not inside those links
                 const allImgs = document.querySelectorAll('img');
                 allImgs.forEach(img => {
                     if (!img.closest('a[href*="img_url="]')) {
@@ -332,26 +337,25 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15):
         for item in current_data:
             url = item['url']
             if url and not url.startswith('data:') and not 'spacer.gif' in url:
-                # Add normalized URL
                 norm_url = normalize_url(url)
                 accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
 
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 1.5)")
-        await asyncio.sleep(1.0)
+        await page.evaluate("window.scrollBy(0, window.innerHeight * 2.0)")
+        await asyncio.sleep(0.5)
         
-        # Click the "Show more" button if it appears to allow infinite scroll to resume
+        # Click the "Show more" button if it appears
         try:
             button_selector = 'button.FetchListButton-Button, .FetchListButton-Button, .more-button'
             button_loc = page.locator(button_selector)
             if await button_loc.is_visible():
                 print("[auto_scroll] Found 'Show more' button, clicking it...")
                 await button_loc.click()
-                await asyncio.sleep(1.5)  # Wait for new content to load
-        except Exception as e:
+                await asyncio.sleep(0.8)
+        except Exception:
             pass
 
         new_height = await page.evaluate("document.body.scrollHeight")
-        if new_height == last_height and i > 5: break
+        if new_height == last_height and i > 4: break
         last_height = new_height
 
 async def scrape_images(url, autoscroll=True):
@@ -370,16 +374,16 @@ async def scrape_images(url, autoscroll=True):
         
         try:
             print(f"Scraping URL: {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
             # Initial wait
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             
             if autoscroll:
-                await auto_scroll(page, accumulated_data, max_scrolls=45)
+                await auto_scroll(page, accumulated_data, max_scrolls=15, max_seconds=18)
             else:
                 await page.evaluate("window.scrollTo(0, 800)") 
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
         except Exception as e:
             print(f"Page load/scroll failed: {e}")
         
