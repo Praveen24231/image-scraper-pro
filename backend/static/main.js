@@ -59,8 +59,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsDropdown  = document.getElementById('settingsDropdown');
     const backendUrlInput   = document.getElementById('backendUrlInput');
 
-    // Load API Backend URL from localStorage
-    const storedBackendUrl = localStorage.getItem('imageScraperBackendUrl') || '';
+    // Default Render backend URL for Vercel deployment
+    const DEFAULT_BACKEND_URL = 'https://image-scraper-pro.onrender.com';
+
+    // Load API Backend URL from localStorage or fallback to default
+    const storedBackendUrl = localStorage.getItem('imageScraperBackendUrl') || DEFAULT_BACKEND_URL;
     backendUrlInput.value = storedBackendUrl;
 
     // Toggle Settings Dropdown
@@ -93,8 +96,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Helper to get fully qualified API URL
     function getApiUrl(endpoint) {
-        const base = backendUrlInput.value.trim().replace(/\/+$/, '');
-        return base ? `${base}${endpoint}` : endpoint;
+        let base = backendUrlInput.value.trim().replace(/\/+$/, '');
+        if (!base) base = DEFAULT_BACKEND_URL;
+        return `${base}${endpoint}`;
     }
     
     // Selection Bar
