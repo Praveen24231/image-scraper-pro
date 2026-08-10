@@ -374,16 +374,16 @@ async def scrape_images(url, autoscroll=True):
         
         try:
             print(f"Scraping URL: {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             
             # Initial wait
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
             
             if autoscroll:
-                await auto_scroll(page, accumulated_data, max_scrolls=15, max_seconds=18)
+                await auto_scroll(page, accumulated_data, max_scrolls=8, max_seconds=8)
             else:
                 await page.evaluate("window.scrollTo(0, 800)") 
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
         except Exception as e:
             print(f"Page load/scroll failed: {e}")
         
