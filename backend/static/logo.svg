@@ -1,14 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 240" width="100%" height="100%">
-  <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <defs>
+    <linearGradient id="pdGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#39FF14" />
+      <stop offset="100%" stop-color="#00E5FF" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  
+  <g fill="none" stroke="url(#pdGrad)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
     <!-- P Monogram Loop -->
-    <path d="M 90,30 L 90,125" />
-    <path d="M 90,30 L 160,30 C 190,30 190,75 160,75 L 122,75 L 122,112" />
+    <path d="M 90,25 L 90,130" />
+    <path d="M 90,25 L 165,25 C 198,25 198,75 165,75 L 120,75 L 120,118" />
     
     <!-- D Monogram Loop -->
-    <path d="M 105,48 L 105,145 L 155,145 C 205,145 205,48 155,48 Z" stroke-width="7.5" />
+    <path d="M 105,45 L 105,150 L 160,150 C 215,150 215,45 160,45 Z" stroke-width="8.5" />
   </g>
   
   <!-- Text Labels -->
-  <text x="150" y="185" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="800" font-size="28" letter-spacing="4" fill="currentColor">PRAVEEN</text>
-  <text x="150" y="215" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="400" font-size="16" letter-spacing="9" fill="currentColor" opacity="0.85">DANIEL</text>
+  <text x="150" y="192" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" font-size="28" letter-spacing="4" fill="#FFFFFF">PRAVEEN</text>
+  <text x="150" y="222" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="600" font-size="16" letter-spacing="9" fill="#39FF14" opacity="0.95">DANIEL</text>
 </svg>
