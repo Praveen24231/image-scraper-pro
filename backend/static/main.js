@@ -59,16 +59,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsDropdown  = document.getElementById('settingsDropdown');
     const backendUrlInput   = document.getElementById('backendUrlInput');
 
-    // Default Render backend URL for Vercel deployment
+    // ─── Backend URL Configuration ──────────────────────────────────────────
+    // ALWAYS use the Render backend. Overwrite localStorage to fix other-laptop issues.
     const DEFAULT_BACKEND_URL = 'https://image-scraper-pro.onrender.com';
-
-    // Load API Backend URL from localStorage or fallback to default
-    let storedBackendUrl = localStorage.getItem('imageScraperBackendUrl');
-    if (!storedBackendUrl || storedBackendUrl.includes('localhost') || storedBackendUrl.includes('127.0.0.1')) {
-        storedBackendUrl = DEFAULT_BACKEND_URL;
-        localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
-    }
-    backendUrlInput.value = storedBackendUrl;
+    localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
+    backendUrlInput.value = DEFAULT_BACKEND_URL;
 
     // Toggle Settings Dropdown
     settingsToggleBtn.addEventListener('click', (e) => {
@@ -83,31 +78,87 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Prevent closing when clicking inside the dropdown
-    settingsDropdown.addEventListener('click', (e) => {
-        e.stopPropagation();
-    });
+    settingsDropdown.addEventListener('click', (e) => e.stopPropagation());
 
-    // Save Backend URL on input changes
-    backendUrlInput.addEventListener('input', () => {
-        let val = backendUrlInput.value.trim();
-        // Remove trailing slash if present for standard concatenation
-        if (val.endsWith('/')) {
-            val = val.slice(0, -1);
-        }
+    // Save Backend URL on input changes (still allows manual override)
+    backendUrlInput.addEventListener('change', () => {
+        let val = backendUrlInput.value.trim().replace(/\/+$/, '');
+        if (!val) val = DEFAULT_BACKEND_URL;
+        backendUrlInput.value = val;
         localStorage.setItem('imageScraperBackendUrl', val);
     });
 
     // Helper to get fully qualified API URL
     function getApiUrl(endpoint) {
-        let base = backendUrlInput.value.trim().replace(/\/+$/, '');
-        // Force fallback to Render backend if empty or pointing to frontend domain
-        if (!base || base.includes('vercel.app') || base.includes('localhost') || base.includes('127.0.0.1')) {
-            base = DEFAULT_BACKEND_URL;
-            backendUrlInput.value = DEFAULT_BACKEND_URL;
-            localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
-        }
+        let base = (backendUrlInput.value || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, '');
         return `${base}${endpoint}`;
+    }
+
+    // ─── Wake-up Ping Helper ─────────────────────────────────────────────────
+    // Render free tier sleeps after 15 min inactivity. When sleeping, first
+    // request returns an HTML wakeup page — NOT JSON. This function:
+    //  1. Pings /health first (fast, ~1s)
+    //  2. If sleeping (HTML returned) shows countdown + auto-retries after 38s
+    async function pingBackendAwake() {
+        try {
+            const r = await fetch(getApiUrl('/health'), { method: 'GET', cache: 'no-store' });
+            const ct = r.headers.get('content-type') || '';
+            if (ct.includes('application/json')) {
+                const j = await r.json();
+                return j.status === 'ok'; // true = awake
+            }
+        } catch (e) { /* network error = still sleeping */ }
+        return false;
+    }
+
+    // ─── Auto-Wake + Retry Scrape ────────────────────────────────────────────
+    async function performScrape(url, autoscroll, isRetry = false) {
+        const loaderMsg = loader.querySelector('p');
+
+        try {
+            const response = await fetch(getApiUrl('/api/scrape'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, autoscroll })
+            });
+
+            // Guard: check content-type BEFORE calling .json()
+            const contentType = response.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                // Got HTML (Render waking up) or unknown response
+                throw new Error('SLEEPING');
+            }
+
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+
+            return data;
+        } catch (err) {
+            const isSleeping = err.message === 'SLEEPING' || err.name === 'SyntaxError';
+
+            if (isSleeping && !isRetry) {
+                // Backend is sleeping — show countdown and auto-retry
+                let secsLeft = 38;
+                const countInterval = setInterval(() => {
+                    secsLeft--;
+                    if (loaderMsg) {
+                        loaderMsg.textContent = `⏳ Backend is waking up (free server)... auto-retrying in ${secsLeft}s`;
+                    }
+                }, 1000);
+
+                await new Promise(resolve => setTimeout(resolve, 38000));
+                clearInterval(countInterval);
+
+                if (loaderMsg) loaderMsg.textContent = '🔄 Retrying scrape now...';
+                return await performScrape(url, autoscroll, true); // one retry
+            }
+
+            // All other errors (or retry also failed)
+            if (isSleeping) {
+                throw new Error('Backend server is still starting up. Please wait 60 seconds and try again.');
+            }
+            throw err;
+        }
     }
     
     // Selection Bar
@@ -149,6 +200,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Downloader control state
     let downloadAborted = false;
     let activeDownloads = 0;
+
+    // ─── Silent Background Pre-Warm ───────────────────────────────────────────
+    // Silently ping /health on page load so Render wakes up BEFORE user scrapes.
+    // This dramatically reduces wait time on first scrape.
+    (async () => {
+        try {
+            await fetch(getApiUrl('/health'), { method: 'GET', cache: 'no-store' });
+        } catch (e) { /* silent — backend is sleeping, will be handled later */ }
+    })();
 
     // ==========================================================================
     // Theme Switcher Controller
@@ -294,27 +354,15 @@ document.addEventListener('DOMContentLoaded', () => {
         imageGrid.innerHTML = '';
         selectedUrls.clear();
         updateSelectionUI();
-        countPanel.classList.add('hidden'); // dismiss stale count on new scrape
+        countPanel.classList.add('hidden');
 
         const autoscroll = autoscrollToggle.checked;
         loader.querySelector('p').textContent = autoscroll
-            ? 'Deep scraping with auto-scroll... (This may take up to 30s)'
-            : 'Scraping page elements...';
+            ? '🔍 Deep scraping with auto-scroll... (may take 20-30s)'
+            : '⚡ Scraping page elements...';
 
         try {
-            const response = await fetch(getApiUrl('/api/scrape'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, autoscroll })
-            });
-
-            if (!response.ok) {
-                const rawText = await response.text();
-                throw new Error(`Backend server error (${response.status}). Please check API URL.`);
-            }
-
-            const data = await response.json();
-            if (data.error) throw new Error(data.error);
+            const data = await performScrape(url, autoscroll);
 
             allImages = data.images;
             filterSelect.value = 'all';
@@ -324,8 +372,8 @@ document.addEventListener('DOMContentLoaded', () => {
             resultsSection.classList.remove('hidden');
             lucide.createIcons();
         } catch (err) {
-            alert('Scraping failed: ' + err.message);
             loader.classList.add('hidden');
+            alert('❌ ' + err.message);
         }
     });
 

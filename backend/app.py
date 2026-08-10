@@ -340,8 +340,8 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
                 norm_url = normalize_url(url)
                 accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
 
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 3.0)")
-        await asyncio.sleep(0.35)
+        await page.evaluate("window.scrollBy(0, window.innerHeight * 4.0)")
+        await asyncio.sleep(0.25)
         
         # Click the "Show more" button if it appears
         try:
@@ -390,11 +390,11 @@ async def scrape_images(url, autoscroll=True):
             
             try:
                 print(f"Scraping URL with Playwright: {url}")
-                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
-                await asyncio.sleep(1.0)
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(1.5)
                 
                 if autoscroll:
-                    await auto_scroll(page, accumulated_data, max_scrolls=20, max_seconds=14)
+                    await auto_scroll(page, accumulated_data, max_scrolls=30, max_seconds=22)
                 else:
                     await page.evaluate("window.scrollTo(0, 800)") 
                     await asyncio.sleep(0.5)
@@ -563,6 +563,12 @@ async def scrape_images(url, autoscroll=True):
 @app.route('/')
 def index():
     return send_from_directory('static', 'index.html')
+
+@app.route('/health', methods=['GET', 'HEAD'])
+@app.route('/api/health', methods=['GET', 'HEAD'])
+def health():
+    """Lightweight keep-alive / wake-up probe. Returns immediately."""
+    return jsonify({'status': 'ok', 'service': 'image-scraper-pro'})
 
 @app.route('/api/scrape', methods=['POST'])
 def api_scrape():
