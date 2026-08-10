@@ -63,7 +63,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const DEFAULT_BACKEND_URL = 'https://image-scraper-pro.onrender.com';
 
     // Load API Backend URL from localStorage or fallback to default
-    const storedBackendUrl = localStorage.getItem('imageScraperBackendUrl') || DEFAULT_BACKEND_URL;
+    let storedBackendUrl = localStorage.getItem('imageScraperBackendUrl');
+    if (!storedBackendUrl || storedBackendUrl.includes('localhost') || storedBackendUrl.includes('127.0.0.1')) {
+        storedBackendUrl = DEFAULT_BACKEND_URL;
+        localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
+    }
     backendUrlInput.value = storedBackendUrl;
 
     // Toggle Settings Dropdown

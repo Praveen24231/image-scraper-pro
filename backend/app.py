@@ -186,7 +186,10 @@ async def fast_count_images(url: str) -> dict:
         fetch_method = 'playwright'
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+                )
                 ctx = await browser.new_context(
                     user_agent=headers['User-Agent'])
                 page = await ctx.new_page()
@@ -354,7 +357,10 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15):
 async def scrape_images(url, autoscroll=True):
     async with async_playwright() as p:
         # Use a real-looking user agent
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
