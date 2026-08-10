@@ -470,7 +470,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             (img.height && img.height !== 'Original' && img.height > 1000);
             const isOriginal = (hasOrig || isLarge);
 
-            const proxyUrl = `/api/proxy_download?url=${encodeURIComponent(img.url)}`;
+            const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
 
             card.innerHTML = `
                 <!-- Custom Checkbox overlay -->
@@ -478,7 +478,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <i data-lucide="check"></i>
                 </div>
                 
-                <img src="${proxyUrl}" alt="${img.alt || 'Image'}" loading="lazy">
+                <img src="${img.url}" onerror="this.onerror=null;this.src='${proxyUrl}';" alt="${img.alt || 'Image'}" loading="lazy">
                 
                 <div class="card-overlay">
                     <span class="badge ${isOriginal ? 'badge-orig' : 'badge-hq'}">
@@ -817,10 +817,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentLightboxIdx < 0 || currentLightboxIdx >= filteredImages.length) return;
         
         const img = filteredImages[currentLightboxIdx];
-        const proxyUrl = `/api/proxy_download?url=${encodeURIComponent(img.url)}`;
+        const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
         
-        // Show loading placeholder visual state
-        lightboxImg.src = proxyUrl;
+        // Direct load with proxy fallback
+        lightboxImg.src = img.url;
+        lightboxImg.onerror = function() {
+            this.onerror = null;
+            this.src = proxyUrl;
+        };
         lightboxTitle.textContent = img.alt || 'High-Resolution Visual Asset';
         lightboxCounter.textContent = `${currentLightboxIdx + 1} of ${filteredImages.length}`;
         
@@ -863,7 +867,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Trigger single download trigger
         const a = document.createElement('a');
-        a.href = `/api/proxy_download?url=${encodeURIComponent(img.url)}`;
+        a.href = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
         let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
         if (!['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) ext = 'jpg';
         a.download = `preview_download_${Date.now().toString().slice(-4)}.${ext}`;

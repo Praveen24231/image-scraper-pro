@@ -292,18 +292,15 @@ def api_count():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
+async def auto_scroll(page, accumulation_set, max_scrolls=40, max_seconds=22):
     start_time = asyncio.get_event_loop().time()
-    last_height = await page.evaluate("document.body.scrollHeight")
     
     for i in range(max_scrolls):
-        # Time budget guard: ensure total scroll execution never exceeds max_seconds
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > max_seconds:
             print(f"[auto_scroll] Time limit reached ({elapsed:.1f}s), finishing scroll.")
             break
 
-        # JS evaluation to find both thumbnails and high-res links
         current_data = await page.evaluate("""
             () => {
                 const results = [];
@@ -326,10 +323,18 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
 
                 const allImgs = document.querySelectorAll('img');
                 allImgs.forEach(img => {
-                    if (!img.closest('a[href*="img_url="]')) {
-                        results.push({ url: img.src, alt: img.alt || "", isHighRes: false });
+                    const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original');
+                    if (src) {
+                        results.push({ url: src, alt: img.alt || "", isHighRes: false });
                     }
                 });
+
+                // Fast instant JS click for "Show More" button
+                const moreBtn = document.querySelector('button.FetchListButton-Button, .FetchListButton-Button, .more-button, .serp-list__more, a.more');
+                if (moreBtn && moreBtn.offsetHeight > 0) {
+                    try { moreBtn.click(); } catch(e) {}
+                }
+
                 return results;
             }
         """)
@@ -340,23 +345,8 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
                 norm_url = normalize_url(url)
                 accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
 
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 4.0)")
-        await asyncio.sleep(0.25)
-        
-        # Click the "Show more" button if it appears
-        try:
-            button_selector = 'button.FetchListButton-Button, .FetchListButton-Button, .more-button'
-            button_loc = page.locator(button_selector)
-            if await button_loc.is_visible():
-                print("[auto_scroll] Found 'Show more' button, clicking it...")
-                await button_loc.click()
-                await asyncio.sleep(0.8)
-        except Exception:
-            pass
-
-        new_height = await page.evaluate("document.body.scrollHeight")
-        if new_height == last_height and i > 4: break
-        last_height = new_height
+        await page.evaluate("window.scrollBy(0, window.innerHeight * 5.0)")
+        await asyncio.sleep(0.18)
 
 def fast_static_fetch(target_url):
     headers = {
@@ -416,10 +406,6 @@ async def scrape_images(url, autoscroll=True):
     def add_img(url, alt, w=0, h=0):
         if not url or url.startswith('data:'): return
         
-        # Skip low-res Yandex search grid thumbnails
-        if 'avatars.mds.yandex.net' in url and '/i?id=' in url:
-            return
-            
         # Skip SVGs, web icons, tracking pixels, or standard small logos
         if url.split('?')[0].endswith('.svg') or any(k in url.lower() for k in ['favicon', '/tracker', 'pixel.gif', 'doubleclick', 'google-analytics', 'yandex.ru/metrika', 'logo', 'spinner', 'icon']):
             return
@@ -531,8 +517,6 @@ async def scrape_images(url, autoscroll=True):
     # 1. Process accumulated images (captured during scroll)
     for data in list(accumulated_data):
         img_u, alt = data[0], data[1]
-        if 'avatars.mds.yandex.net' in img_u and '/i?id=' in img_u:
-            continue
         add_img(img_u, alt)
 
     # 2. Extract from final DOM (BS4) - especially links
@@ -551,9 +535,6 @@ async def scrape_images(url, autoscroll=True):
         if not src: continue
         
         if 'icon' in src.lower() or 'logo' in src.lower() or 'spinner' in src.lower(): continue
-        
-        if 'avatars.mds.yandex.net' in src and '/i?id=' in src:
-            continue
             
         add_img(src, img.get('alt', ''))
     
