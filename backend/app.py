@@ -340,8 +340,8 @@ async def auto_scroll(page, accumulation_set, max_scrolls=15, max_seconds=18):
                 norm_url = normalize_url(url)
                 accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
 
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 2.0)")
-        await asyncio.sleep(0.5)
+        await page.evaluate("window.scrollBy(0, window.innerHeight * 3.0)")
+        await asyncio.sleep(0.35)
         
         # Click the "Show more" button if it appears
         try:
@@ -394,7 +394,7 @@ async def scrape_images(url, autoscroll=True):
                 await asyncio.sleep(1.0)
                 
                 if autoscroll:
-                    await auto_scroll(page, accumulated_data, max_scrolls=5, max_seconds=6)
+                    await auto_scroll(page, accumulated_data, max_scrolls=20, max_seconds=14)
                 else:
                     await page.evaluate("window.scrollTo(0, 800)") 
                     await asyncio.sleep(0.5)
