@@ -18,61 +18,55 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================================================
     // DOM REFS
     // ==========================================================================
-    const urlInput           = document.getElementById('urlInput');
-    const scrapeBtn          = document.getElementById('scrapeBtn');
-    const loader             = document.getElementById('loader');
-    const loaderMsg          = document.getElementById('loaderMsg');
-    const resultsSection     = document.getElementById('resultsSection');
-    const imageGrid          = document.getElementById('imageGrid');
-    const imageCount         = document.getElementById('imageCount');
-    const downloadBtn        = document.getElementById('downloadBtn');
-    const downloadZipBtn     = document.getElementById('downloadZipBtn');
-    const autoscrollToggle   = document.getElementById('autoscrollToggle');
-    const filterSelect       = document.getElementById('filterSelect');
-    const countBtn           = document.getElementById('countBtn');
-    const countPanel         = document.getElementById('countPanel');
-    const countTotal         = document.getElementById('countTotal');
-    const countMethodBadge   = document.getElementById('countMethodBadge');
-    const countBreakdown     = document.getElementById('countBreakdown');
-    const countNote          = document.getElementById('countNote');
-    const countDismissBtn    = document.getElementById('countDismissBtn');
-    const themeToggleBtn     = document.getElementById('themeToggleBtn');
-    const selectionBar       = document.getElementById('selectionBar');
-    const selectionInfo      = document.getElementById('selectionInfo');
-    const selectAllBtn       = document.getElementById('selectAllBtn');
-    const clearSelectionBtn  = document.getElementById('clearSelectionBtn');
-    const downloadModal      = document.getElementById('downloadModal');
-    const downloadModalTitle = document.getElementById('downloadModalTitle');
-    const downloadModalStatus= document.getElementById('downloadModalStatus');
-    const progressBarFill    = document.getElementById('progressBarFill');
-    const statProgress       = document.getElementById('statProgress');
-    const statSpeed          = document.getElementById('statSpeed');
-    const statEta            = document.getElementById('statEta');
-    const downloadLog        = document.getElementById('downloadLog');
-    const cancelDownloadBtn  = document.getElementById('cancelDownloadBtn');
-    const lightboxModal      = document.getElementById('lightboxModal');
-    const lightboxTitle      = document.getElementById('lightboxTitle');
-    const lightboxImg        = document.getElementById('lightboxImg');
-    const lightboxSpinner    = document.getElementById('lightboxSpinner');
-    const lightboxCloseBtn   = document.getElementById('lightboxCloseBtn');
-    const lightboxPrevBtn    = document.getElementById('lightboxPrevBtn');
-    const lightboxNextBtn    = document.getElementById('lightboxNextBtn');
-    const lightboxDownloadBtn= document.getElementById('lightboxDownloadBtn');
-    const lightboxMeta       = document.getElementById('lightboxMeta');
-    const lightboxCounter    = document.getElementById('lightboxCounter');
-    const settingsToggleBtn  = document.getElementById('settingsToggleBtn');
-    const settingsDropdown   = document.getElementById('settingsDropdown');
-    const toastContainer     = document.getElementById('toastContainer');
+    const urlInput            = document.getElementById('urlInput');
+    const scrapeBtn           = document.getElementById('scrapeBtn');
+    const loader              = document.getElementById('loader');
+    const loaderMsg           = document.getElementById('loaderMsg');
+    const resultsSection      = document.getElementById('resultsSection');
+    const imageGrid           = document.getElementById('imageGrid');
+    const imageCount          = document.getElementById('imageCount');
+    const downloadBtn         = document.getElementById('downloadBtn');
+    const downloadZipBtn      = document.getElementById('downloadZipBtn');
+    const autoscrollToggle    = document.getElementById('autoscrollToggle');
+    const filterSelect        = document.getElementById('filterSelect');
+    const countBtn            = document.getElementById('countBtn');
+    const countPanel          = document.getElementById('countPanel');
+    const countTotal          = document.getElementById('countTotal');
+    const countMethodBadge    = document.getElementById('countMethodBadge');
+    const countBreakdown      = document.getElementById('countBreakdown');
+    const countNote           = document.getElementById('countNote');
+    const countDismissBtn     = document.getElementById('countDismissBtn');
+    const themeToggleBtn      = document.getElementById('themeToggleBtn');
+    const selectionBar        = document.getElementById('selectionBar');
+    const selectionInfo       = document.getElementById('selectionInfo');
+    const selectAllBtn        = document.getElementById('selectAllBtn');
+    const clearSelectionBtn   = document.getElementById('clearSelectionBtn');
+    const downloadModal       = document.getElementById('downloadModal');
+    const downloadModalTitle  = document.getElementById('downloadModalTitle');
+    const downloadModalStatus = document.getElementById('downloadModalStatus');
+    const progressBarFill     = document.getElementById('progressBarFill');
+    const statProgress        = document.getElementById('statProgress');
+    const statSpeed           = document.getElementById('statSpeed');
+    const statEta             = document.getElementById('statEta');
+    const downloadLog         = document.getElementById('downloadLog');
+    const cancelDownloadBtn   = document.getElementById('cancelDownloadBtn');
+    const lightboxModal       = document.getElementById('lightboxModal');
+    const lightboxTitle       = document.getElementById('lightboxTitle');
+    const lightboxImg         = document.getElementById('lightboxImg');
+    const lightboxSpinner     = document.getElementById('lightboxSpinner');
+    const lightboxCloseBtn    = document.getElementById('lightboxCloseBtn');
+    const lightboxPrevBtn     = document.getElementById('lightboxPrevBtn');
+    const lightboxNextBtn     = document.getElementById('lightboxNextBtn');
+    const lightboxDownloadBtn = document.getElementById('lightboxDownloadBtn');
+    const lightboxMeta        = document.getElementById('lightboxMeta');
+    const lightboxCounter     = document.getElementById('lightboxCounter');
+    const settingsToggleBtn   = document.getElementById('settingsToggleBtn');
+    const settingsDropdown    = document.getElementById('settingsDropdown');
+    const toastContainer      = document.getElementById('toastContainer');
 
     // ==========================================================================
-    // TOAST NOTIFICATION SYSTEM
+    // TOAST SYSTEM
     // ==========================================================================
-    /**
-     * Show a non-blocking toast notification.
-     * @param {string} message
-     * @param {'success'|'error'|'info'} type
-     * @param {number} duration ms before auto-dismiss
-     */
     function showToast(message, type = 'info', duration = 3800) {
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
@@ -85,16 +79,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================================================
-    // BACKEND DETECTION — local Python server
+    // BACKEND DETECTION — local Python server (http://localhost:5000)
+    // Note: On HTTPS Vercel, mixed-content rules block http:// calls,
+    //       so localAvailable will always be false there — that's correct.
     // ==========================================================================
     const LOCAL_API = 'http://localhost:5000';
     let localAvailable = false;
-    let localCheckTs = 0; // timestamp of last check (ms)
-    const LOCAL_CHECK_TTL = 30000; // 30 seconds
+    let localCheckTs = 0;
+    const LOCAL_CHECK_TTL = 30000; // 30s cache
 
     async function checkLocalBackend(force = false) {
         const now = Date.now();
-        if (!force && (now - localCheckTs) < LOCAL_CHECK_TTL) return; // use cached result
+        if (!force && (now - localCheckTs) < LOCAL_CHECK_TTL) return;
         localCheckTs = now;
         try {
             const r = await fetch(`${LOCAL_API}/api/health`, { signal: AbortSignal.timeout(1500) });
@@ -113,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             ${localAvailable
                 ? '<span style="color:#5efb6e;">Scraping from your real IP — 1000+ images, no captcha.</span>'
-                : `<span style="color:#ff8844;">Start the local backend:<br>
+                : `<span style="color:#ff8844;">Start for 1000+ images:<br>
                    <code style="font-size:10px;background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px;">cd backend &amp;&amp; python app.py</code></span>`}
         </div>`;
         lucide.createIcons();
@@ -122,12 +118,7 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsToggleBtn && settingsToggleBtn.addEventListener('click', e => {
         e.stopPropagation();
         checkLocalBackend(true);
-        const isHidden = settingsDropdown.classList.contains('settings-dropdown--hidden');
-        if (isHidden) {
-            settingsDropdown.classList.remove('settings-dropdown--hidden');
-        } else {
-            settingsDropdown.classList.add('settings-dropdown--hidden');
-        }
+        settingsDropdown.classList.toggle('settings-dropdown--hidden');
     });
     document.addEventListener('click', e => {
         if (settingsDropdown &&
@@ -166,7 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
     urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') scrapeBtn.click(); });
 
     // ==========================================================================
-    // EMPTY / ERROR STATE HELPERS
+    // EMPTY / ERROR STATE HELPER
     // ==========================================================================
     function renderEmptyState({ icon = 'image-off', title, body, note = '' }) {
         return `<div class="empty-state">
@@ -178,17 +169,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================================================
-    // SCRAPE — calls local Python backend (real IP, no captcha)
-    // ==========================================================================
-    // ==========================================================================
-    // SCRAPE VIA VERCEL PROXY — parses Yandex HTML without local backend
+    // VERCEL PROXY SCRAPER — parses Yandex HTML when local backend unavailable
     // ==========================================================================
     async function scrapeViaProxy(url) {
         const images = [];
         const seen = new Set();
 
-        // Fetch one page of Yandex Images HTML via the serverless proxy
-        async function fetchPage(pageUrl) {
+        async function proxyFetch(pageUrl) {
             try {
                 const r = await fetch(`/api/proxy?url=${encodeURIComponent(pageUrl)}`, {
                     signal: AbortSignal.timeout(20000)
@@ -199,33 +186,38 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch { return null; }
         }
 
-        function extractImages(html) {
-            // Extract high-res URLs from Yandex Images JSON blobs in page HTML
+        function parseImages(html) {
             const results = [];
-            // Pattern 1: "url":"https://..." in data-bem or JSON
+            // Pattern 1: any image URL in JSON (data-bem, JSON blobs)
             const urlRe = /"url"\s*:\s*"(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp|gif|avif)[^"]*)"/gi;
             let m;
             while ((m = urlRe.exec(html)) !== null) {
-                const u = m[1].replace(/\\\/g, '/');
+                const u = m[1].replace(/\\/g, '');
                 if (!seen.has(u) && !u.includes('yastatic') && !u.includes('favicon')) {
-                    seen.add(u); results.push({ url: u, thumb: u, alt: 'Image' });
+                    seen.add(u);
+                    results.push({ url: u, thumb: u, alt: 'Image' });
                 }
             }
             // Pattern 2: "orig":{"url":"..."
             const origRe = /"orig"\s*:\s*\{[^}]*"url"\s*:\s*"(https?:\/\/[^"]+)"/gi;
             while ((m = origRe.exec(html)) !== null) {
                 const u = m[1].replace(/\\/g, '');
-                if (!seen.has(u)) { seen.add(u); results.push({ url: u, thumb: u, alt: 'Image' }); }
+                if (!seen.has(u)) {
+                    seen.add(u);
+                    results.push({ url: u, thumb: u, alt: 'Image' });
+                }
             }
             return results;
         }
 
-        // Always fetch page 0
-        const html0 = await fetchPage(url);
-        if (html0) images.push(...extractImages(html0));
+        const html = await proxyFetch(url);
+        if (html) images.push(...parseImages(html));
         return images;
     }
 
+    // ==========================================================================
+    // SCRAPE — dual mode: local backend (fast) OR Vercel proxy (cloud fallback)
+    // ==========================================================================
     scrapeBtn.addEventListener('click', async () => {
         const url = urlInput.value.trim();
         if (!url) {
@@ -247,7 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const deepMode = autoscrollToggle.checked;
 
         if (localAvailable) {
-            // ── Mode A: Local Python backend (fastest, 1000+ images, your real IP)
+            // ── Mode A: Local Python backend (real IP, 1000+ images, fastest)
             loaderMsg.textContent = deepMode
                 ? '⚡ Deep scraping via local backend (up to 1000+ images)…'
                 : '⚡ Scraping via local backend…';
@@ -262,14 +254,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.error) throw new Error(data.error);
                 allImages = data.images || [];
             } catch (err) {
-                // Local backend failed — fall through to Vercel proxy mode
-                showToast('Local backend error — trying Vercel proxy…', 'info');
+                // Local backend failed — fall through to cloud proxy
+                showToast('Local backend error — trying cloud proxy…', 'info');
                 loaderMsg.textContent = '🌐 Scraping via cloud proxy (page 1 only)…';
                 allImages = await scrapeViaProxy(url);
             }
         } else {
-            // ── Mode B: Vercel serverless proxy (cloud mode, page 1 only)
-            loaderMsg.textContent = '🌐 Scraping via cloud proxy (no local backend detected)…';
+            // ── Mode B: Vercel serverless proxy (cloud mode, single page)
+            loaderMsg.textContent = '🌐 Scraping via cloud proxy…';
             allImages = await scrapeViaProxy(url);
         }
 
@@ -280,7 +272,7 @@ document.addEventListener('DOMContentLoaded', () => {
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'search-x',
                 title: 'No Images Found',
-                body: `Try a direct Yandex Images search URL:<br>
+                body: `Try a Yandex Images search URL:<br>
                        <code>https://yandex.com/images/search?text=cats</code><br><br>
                        For 1000+ images, run the local backend:<br>
                        <code>cd backend &amp;&amp; python app.py</code>`
@@ -296,7 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================================================
-    // COUNT — uses fast /api/count endpoint (page 0 only)
+    // COUNT — uses fast /api/count endpoint on local backend
     // ==========================================================================
     function animateCount(el, target) {
         const start = performance.now();
@@ -328,22 +320,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const total = data.count || 0;
             const bd    = data.breakdown || {};
-
             countPanel.classList.remove('hidden');
             animateCount(countTotal, total);
             countMethodBadge.textContent = '⚡ Local (page 1 only)';
             countBreakdown.innerHTML = Object.entries(bd).map(([k, v]) =>
                 `<span class="count-chip"><strong>${v}</strong> ${k.toUpperCase()}</span>`
             ).join('') || '<span class="count-chip">No breakdown</span>';
-            countNote.textContent = `Page 1 only. Enable Deep Scrape to fetch 1000+ images.`;
+            countNote.textContent = 'Page 1 only. Enable Deep Scrape to fetch 1000+ images.';
             showToast(`${total} images detected on page 1`, 'success');
         } catch (err) {
             countPanel.classList.remove('hidden');
             countTotal.textContent = '?';
             countMethodBadge.textContent = 'Error';
             countBreakdown.innerHTML = '';
-            // Format error message cleanly
-            const msg = err.message.includes('Failed to fetch') || err.message.includes('NetworkError')
+            const msg = (err.message.includes('Failed to fetch') || err.message.includes('NetworkError'))
                 ? 'Could not reach local backend. Make sure it is running.'
                 : err.message;
             countNote.textContent = msg;
@@ -362,21 +352,24 @@ document.addEventListener('DOMContentLoaded', () => {
     filterSelect.addEventListener('change', applyFilter);
     function applyFilter() {
         const f = filterSelect.value;
-        if (f === 'all') filteredImages = [...allImages];
-        else if (f === 'hd') filteredImages = allImages.filter(i => i.isHighRes || String(i.width) > 1080);
-        else filteredImages = allImages.filter(i => {
-            const ext = i.url.split('.').pop().split('?')[0].toLowerCase();
-            return f === 'jpg' ? (ext === 'jpg' || ext === 'jpeg') : ext === f;
-        });
+        if (f === 'all') {
+            filteredImages = [...allImages];
+        } else if (f === 'hd') {
+            filteredImages = allImages.filter(i => i.isHighRes || Number(i.width) > 1080);
+        } else {
+            filteredImages = allImages.filter(i => {
+                const ext = i.url.split('.').pop().split('?')[0].toLowerCase();
+                return f === 'jpg' ? (ext === 'jpg' || ext === 'jpeg') : ext === f;
+            });
+        }
 
-        const prev = filteredImages.length;
         imageCount.textContent = `Found ${filteredImages.length} images`;
 
-        // Remove selected URLs that are no longer in the filtered set
+        // Remove selected URLs no longer in filtered set
         const fSet = new Set(filteredImages.map(i => i.url));
-        const removed = [];
-        selectedUrls.forEach(u => { if (!fSet.has(u)) { selectedUrls.delete(u); removed.push(u); } });
-        if (removed.length) showToast(`${removed.length} selected image(s) removed by filter`, 'info');
+        let removedCount = 0;
+        selectedUrls.forEach(u => { if (!fSet.has(u)) { selectedUrls.delete(u); removedCount++; } });
+        if (removedCount) showToast(`${removedCount} selected image(s) removed by filter`, 'info');
 
         updateSelectionUI();
         displayImages(filteredImages);
@@ -412,7 +405,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================================================
-    // DISPLAY
+    // DISPLAY IMAGE GRID
     // ==========================================================================
     function displayImages(images) {
         imageGrid.innerHTML = '';
@@ -469,11 +462,11 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadModal.classList.add('active');
     }
 
-    function log(text, type = '') {
-        const e = document.createElement('div');
-        e.className = `log-entry ${type}`;
-        e.textContent = text;
-        downloadLog.appendChild(e);
+    function logEntry(text, type = '') {
+        const el = document.createElement('div');
+        el.className = `log-entry ${type}`;
+        el.textContent = text;
+        downloadLog.appendChild(el);
         downloadLog.scrollTop = downloadLog.scrollHeight;
     }
 
@@ -484,9 +477,16 @@ document.addEventListener('DOMContentLoaded', () => {
         statEta.textContent = eta;
     }
 
-    // Close modal on backdrop click
+    function doneModal(successMsg) {
+        cancelDownloadBtn.textContent = 'Close Panel';
+        cancelDownloadBtn.className = 'btn-primary';
+        cancelDownloadBtn.disabled = false;
+        if (successMsg) showToast(successMsg, 'success');
+    }
+
+    // Close modal on backdrop click (only when not actively downloading)
     downloadModal.addEventListener('click', e => {
-        if (e.target === downloadModal && !downloadAborted) {
+        if (e.target === downloadModal && cancelDownloadBtn.textContent === 'Close Panel') {
             downloadModal.classList.remove('active');
         }
     });
@@ -497,33 +497,26 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         downloadAborted = true;
-        log('Aborting…', 'fail');
+        logEntry('Aborting…', 'fail');
         downloadModalStatus.textContent = 'Cancelling…';
         cancelDownloadBtn.disabled = true;
     });
 
-    function doneModal(successMsg) {
-        cancelDownloadBtn.textContent = 'Close Panel';
-        cancelDownloadBtn.className = 'btn-primary';
-        cancelDownloadBtn.disabled = false;
-        if (successMsg) showToast(successMsg, 'success');
-    }
-
     // ==========================================================================
-    // DOWNLOAD — via local backend (handles CORS for Yandex CDN images)
+    // FETCH IMAGE BLOB — 3-tier fallback: direct → Vercel proxy → local proxy
     // ==========================================================================
     async function fetchImageBlob(url) {
-        // 1. Try direct fetch first (many CDN images allow CORS)
+        // 1. Direct fetch (works if CDN has CORS open)
         try {
             const r = await fetch(url, { referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(5000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
-        // 2. Fall back to Vercel serverless proxy
+        // 2. Vercel serverless proxy (works on HTTPS Vercel, never blocked)
         try {
             const r = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(10000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
-        // 3. Fall back to local backend proxy
+        // 3. Local backend proxy (works when running locally)
         try {
             const r = await fetch(`${LOCAL_API}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(10000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
@@ -531,63 +524,77 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     }
 
+    // Shared parallel worker factory to avoid function name conflicts
+    function makeWorkers(targets, taskFn, concurrency = 6) {
+        let pos = 0;
+        async function runWorker() {
+            while (pos < targets.length && !downloadAborted) {
+                const i = pos++;
+                await taskFn(i, targets[i]);
+            }
+        }
+        return Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, runWorker));
+    }
+
+    // ==========================================================================
+    // DOWNLOAD FILES — individual file download with progress
+    // ==========================================================================
     downloadBtn.addEventListener('click', async () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // Modal-based confirmation (no native confirm() dialog)
-        showModal(`Download ${targets.length} Images`, `Preparing to download ${targets.length} files individually…`);
-        log(`Queued ${targets.length} images for download.`, 'success');
+        showModal(`Download ${targets.length} Images`, `Preparing to download ${targets.length} files…`);
+        logEntry(`Queued ${targets.length} images for download.`, 'success');
 
-        let done = 0, ok = 0, bytes = 0, idx = 0;
+        let done = 0, ok = 0, bytes = 0;
         const t0 = Date.now();
 
-        async function worker() {
-            while (idx < targets.length && !downloadAborted) {
-                const i = idx++, img = targets[i];
-                try {
-                    const blob = await fetchImageBlob(img.url);
-                    if (!blob) throw new Error('Empty response');
-                    bytes += blob.size;
-                    let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
-                    if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
-                    const a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = `img_${String(i + 1).padStart(4, '0')}.${ext}`;
-                    document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
-                    ok++;
-                    log(`✔ img_${i+1} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
-                } catch(e) {
-                    log(`✖ img_${i+1}: ${e.message}`, 'fail');
-                }
-                done++;
-                const el = (Date.now() - t0) / 1000;
-                const sp = bytes / Math.max(el, 0.1);
-                const spTxt = sp < 1048576 ? `${(sp / 1024).toFixed(1)} KB/s` : `${(sp / 1048576).toFixed(1)} MB/s`;
-                const rem = done > 0 ? (el / done) * (targets.length - done) : 0;
-                updateStats((done / targets.length) * 100, spTxt, rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem / 60)}m ${Math.ceil(rem % 60)}s`);
-                downloadModalStatus.textContent = `${done} / ${targets.length} done…`;
+        await makeWorkers(targets, async (i, img) => {
+            try {
+                const blob = await fetchImageBlob(img.url);
+                if (!blob) throw new Error('Empty response');
+                bytes += blob.size;
+                let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
+                if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `img_${String(i + 1).padStart(4, '0')}.${ext}`;
+                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+                ok++;
+                logEntry(`✔ img_${i+1} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
+            } catch(e) {
+                logEntry(`✖ img_${i+1}: ${e.message}`, 'fail');
             }
-        }
+            done++;
+            const elapsed = (Date.now() - t0) / 1000;
+            const sp = bytes / Math.max(elapsed, 0.1);
+            const spTxt = sp < 1048576 ? `${(sp/1024).toFixed(1)} KB/s` : `${(sp/1048576).toFixed(1)} MB/s`;
+            const rem = done > 0 ? (elapsed / done) * (targets.length - done) : 0;
+            updateStats(
+                (done / targets.length) * 100,
+                spTxt,
+                rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem/60)}m ${Math.ceil(rem%60)}s`
+            );
+            downloadModalStatus.textContent = `${done} / ${targets.length} done…`;
+        });
 
-        await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
-        log(`✅ Done: ${ok}/${targets.length} saved.`, 'success');
+        logEntry(`✅ Done: ${ok}/${targets.length} saved.`, 'success');
         downloadModalStatus.textContent = 'Complete!';
         updateStats(100, '—', 'Done');
         doneModal(`Downloaded ${ok} image${ok !== 1 ? 's' : ''} successfully!`);
     });
 
     // ==========================================================================
-    // ZIP DOWNLOAD — local backend OR client-side JSZip fallback
+    // ZIP DOWNLOAD — local backend (fast) OR in-browser JSZip (HTTPS fallback)
     // ==========================================================================
     downloadZipBtn.addEventListener('click', async () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // Mode 1: Try Local Backend Fast Parallel ZIP (if connected)
+        // ── Mode 1: Local backend fast parallel ZIP
         if (localAvailable) {
             showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
-            log(`Downloading ${targets.length} images via local backend (12 parallel workers)…`, 'success');
+            logEntry(`Downloading ${targets.length} images via local backend…`, 'success');
             progressBarFill.classList.add('indeterminate');
             updateStats(0, '—', 'Working…');
 
@@ -599,7 +606,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ urls: targets.map(i => i.url) }),
                     signal: AbortSignal.timeout(300000)
                 });
-                if (!res.ok) throw new Error(`Backend error: ${res.status}`);
+                if (!res.ok) throw new Error(`Backend error ${res.status}`);
 
                 progressBarFill.classList.remove('indeterminate');
                 downloadModalStatus.textContent = 'Packaging ZIP…';
@@ -614,87 +621,86 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
 
                 const sizeMB = (blob.size / 1048576).toFixed(2);
-                log(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
+                logEntry(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
                 downloadModalStatus.textContent = 'ZIP downloaded!';
                 doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
                 return;
             } catch(e) {
                 progressBarFill.classList.remove('indeterminate');
-                log(`⚠️ Local backend unreachable (${e.message}). Switching to in-browser ZIP engine…`, 'fail');
-                // Fall through to Mode 2 (Client-Side JSZip)!
+                logEntry(`⚠️ Backend unreachable (${e.message}) — switching to in-browser ZIP…`, 'fail');
+                // fall through to Mode 2
             }
         }
 
-        // Mode 2: Client-side JSZip Fallback (Over HTTPS via /api/proxy)
-        if (typeof JSZip !== 'undefined') {
-            showModal(`Building ZIP — ${targets.length} images`, 'Fetching assets in browser…');
-            log(`Starting client-side ZIP packaging for ${targets.length} images…`, 'info');
-
-            const zip = new JSZip();
-            let done = 0, ok = 0, bytes = 0, idx = 0;
-            const t0 = Date.now();
-
-            async function worker() {
-                while (idx < targets.length && !downloadAborted) {
-                    const i = idx++, img = targets[i];
-                    try {
-                        const blob = await fetchImageBlob(img.url);
-                        if (!blob) throw new Error('Fetch failed');
-                        bytes += blob.size;
-                        let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
-                        if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
-                        zip.file(`image_${String(i + 1).padStart(4, '0')}.${ext}`, blob);
-                        ok++;
-                        log(`✔ Packaged img_${i+1} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
-                    } catch(e) {
-                        log(`✖ img_${i+1}: ${e.message}`, 'fail');
-                    }
-                    done++;
-                    const el = (Date.now() - t0) / 1000;
-                    const sp = bytes / Math.max(el, 0.1);
-                    const spTxt = sp < 1048576 ? `${(sp / 1024).toFixed(1)} KB/s` : `${(sp / 1048576).toFixed(1)} MB/s`;
-                    const rem = done > 0 ? (el / done) * (targets.length - done) : 0;
-                    updateStats((done / targets.length) * 80, spTxt, rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem / 60)}m ${Math.ceil(rem % 60)}s`);
-                    downloadModalStatus.textContent = `${done} / ${targets.length} fetched…`;
-                }
-            }
-
-            await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
-
-            if (downloadAborted || ok === 0) {
-                log('ZIP generation cancelled or no images fetched.', 'fail');
-                doneModal(null);
-                return;
-            }
-
-            downloadModalStatus.textContent = 'Compressing archive…';
-            log('Compressing ZIP archive…', 'info');
-            progressBarFill.classList.add('indeterminate');
-
-            try {
-                const content = await zip.generateAsync({ type: 'blob' });
-                progressBarFill.classList.remove('indeterminate');
-                updateStats(100, '—', 'Done');
-
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(content);
-                a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
-                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
-
-                const sizeMB = (content.size / 1048576).toFixed(2);
-                log(`✅ ZIP generated: ${sizeMB} MB`, 'success');
-                downloadModalStatus.textContent = 'ZIP downloaded!';
-                doneModal(`ZIP saved — ${sizeMB} MB (${ok} images)`);
-            } catch(err) {
-                progressBarFill.classList.remove('indeterminate');
-                log('Compression failed: ' + err.message, 'fail');
-                showToast('ZIP compression failed', 'error');
-                doneModal(null);
-            }
+        // ── Mode 2: Client-side JSZip (works on HTTPS Vercel via /api/proxy)
+        if (typeof JSZip === 'undefined') {
+            showToast('JSZip is still loading — please wait a moment and try again.', 'error');
             return;
         }
 
-        showToast('JSZip library is loading. Please try again in a moment.', 'error');
+        showModal(`Building ZIP — ${targets.length} images`, 'Fetching images in browser…');
+        logEntry(`Starting client-side ZIP for ${targets.length} images…`, 'info');
+
+        const zip = new JSZip();
+        let zipDone = 0, zipOk = 0, zipBytes = 0;
+        const t0 = Date.now();
+
+        await makeWorkers(targets, async (i, img) => {
+            try {
+                const blob = await fetchImageBlob(img.url);
+                if (!blob) throw new Error('Fetch failed');
+                zipBytes += blob.size;
+                let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
+                if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
+                zip.file(`image_${String(i + 1).padStart(4, '0')}.${ext}`, blob);
+                zipOk++;
+                logEntry(`✔ Packaged img_${i+1} (${(blob.size/1024).toFixed(1)} KB)`, 'success');
+            } catch(e) {
+                logEntry(`✖ img_${i+1}: ${e.message}`, 'fail');
+            }
+            zipDone++;
+            const elapsed = (Date.now() - t0) / 1000;
+            const sp = zipBytes / Math.max(elapsed, 0.1);
+            const spTxt = sp < 1048576 ? `${(sp/1024).toFixed(1)} KB/s` : `${(sp/1048576).toFixed(1)} MB/s`;
+            const rem = zipDone > 0 ? (elapsed / zipDone) * (targets.length - zipDone) : 0;
+            updateStats(
+                (zipDone / targets.length) * 80,
+                spTxt,
+                rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem/60)}m ${Math.ceil(rem%60)}s`
+            );
+            downloadModalStatus.textContent = `${zipDone} / ${targets.length} fetched…`;
+        });
+
+        if (downloadAborted || zipOk === 0) {
+            logEntry('No images fetched — ZIP cancelled.', 'fail');
+            doneModal(null);
+            return;
+        }
+
+        downloadModalStatus.textContent = 'Compressing archive…';
+        logEntry('Compressing ZIP archive…', 'info');
+        progressBarFill.classList.add('indeterminate');
+
+        try {
+            const content = await zip.generateAsync({ type: 'blob' });
+            progressBarFill.classList.remove('indeterminate');
+            updateStats(100, '—', 'Done');
+
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(content);
+            a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
+            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+
+            const sizeMB = (content.size / 1048576).toFixed(2);
+            logEntry(`✅ ZIP generated: ${sizeMB} MB`, 'success');
+            downloadModalStatus.textContent = 'ZIP downloaded!';
+            doneModal(`ZIP saved — ${sizeMB} MB (${zipOk} images)`);
+        } catch(err) {
+            progressBarFill.classList.remove('indeterminate');
+            logEntry('Compression failed: ' + err.message, 'fail');
+            showToast('ZIP compression failed', 'error');
+            doneModal(null);
+        }
     });
 
     // ==========================================================================
@@ -712,31 +718,29 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.style.overflow = '';
         lightboxImg.src = '';
         lightboxImg.classList.remove('loaded');
-        lightboxSpinner.classList.remove('hidden');
+        if (lightboxSpinner) lightboxSpinner.classList.remove('hidden');
     }
 
     function updateLightbox() {
         if (currentLightboxIdx < 0 || currentLightboxIdx >= filteredImages.length) return;
         const img = filteredImages[currentLightboxIdx];
 
-        // Show spinner while loading
         lightboxImg.classList.remove('loaded');
-        lightboxSpinner.classList.remove('hidden');
+        if (lightboxSpinner) lightboxSpinner.classList.remove('hidden');
 
         lightboxImg.onload = () => {
             lightboxImg.classList.add('loaded');
-            lightboxSpinner.classList.add('hidden');
+            if (lightboxSpinner) lightboxSpinner.classList.add('hidden');
         };
         lightboxImg.onerror = function() {
             this.onerror = null;
             this.src = img.thumb || img.url;
-            lightboxSpinner.classList.add('hidden');
+            if (lightboxSpinner) lightboxSpinner.classList.add('hidden');
             lightboxImg.classList.add('loaded');
         };
 
         lightboxImg.setAttribute('referrerpolicy', 'no-referrer');
         lightboxImg.src = img.url;
-
         lightboxTitle.textContent = img.alt || 'Yandex Image';
         lightboxCounter.textContent = `${currentLightboxIdx + 1} of ${filteredImages.length}`;
 
@@ -773,12 +777,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Close on backdrop click
     lightboxModal.addEventListener('click', e => {
         if (e.target === lightboxModal) closeLightbox();
     });
 
-    // Keyboard navigation
     document.addEventListener('keydown', e => {
         if (!lightboxModal.classList.contains('active')) return;
         if (e.key === 'Escape') closeLightbox();
@@ -786,7 +788,7 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (e.key === 'ArrowRight') lightboxNextBtn.click();
     });
 
-    // Touch/swipe support for lightbox on mobile
+    // Touch swipe support for lightbox
     let touchStartX = 0, touchStartY = 0;
     lightboxModal.addEventListener('touchstart', e => {
         touchStartX = e.changedTouches[0].clientX;
@@ -797,8 +799,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = e.changedTouches[0].clientY - touchStartY;
         if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
-            if (dx < 0) lightboxNextBtn.click(); // swipe left → next
-            else        lightboxPrevBtn.click(); // swipe right → prev
+            if (dx < 0) lightboxNextBtn.click();
+            else        lightboxPrevBtn.click();
         }
     }, { passive: true });
 });
