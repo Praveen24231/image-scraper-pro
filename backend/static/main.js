@@ -484,14 +484,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // DOWNLOAD — via local backend (handles CORS for Yandex CDN images)
     // ==========================================================================
     async function fetchImageBlob(url) {
-        // Try direct first (many CDN images are CORS-open)
+        // 1. Try direct fetch first (many CDN images allow CORS)
         try {
-            const r = await fetch(url, { referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(8000) });
+            const r = await fetch(url, { referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(5000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
-        // Fall back to local backend proxy
+        // 2. Fall back to Vercel serverless proxy
         try {
-            const r = await fetch(`${LOCAL_API}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(15000) });
+            const r = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(10000) });
+            if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
+        } catch {}
+        // 3. Fall back to local backend proxy
+        try {
+            const r = await fetch(`${LOCAL_API}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(10000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
         return null;
