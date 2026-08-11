@@ -2,908 +2,704 @@ document.addEventListener('DOMContentLoaded', () => {
     lucide.createIcons();
 
     // ==========================================================================
-    // CURSOR-FOLLOW MAGNETIC SPOTLIGHT (Smooth 60fps Lerp)
+    // CURSOR SPOTLIGHT
     // ==========================================================================
     const cursorGlow = document.getElementById('cursorGlow');
-    let mouseX = window.innerWidth / 2;
-    let mouseY = window.innerHeight / 2;
-    let glowX  = mouseX;
-    let glowY  = mouseY;
-    const LERP = 0.08; // Lower = silkier trail, Higher = snappier follow
-
-    document.addEventListener('mousemove', (e) => {
-        mouseX = e.clientX;
-        mouseY = e.clientY;
-    });
-
-    function animateCursor() {
-        // Smooth lerp interpolation towards real mouse position
-        glowX += (mouseX - glowX) * LERP;
-        glowY += (mouseY - glowY) * LERP;
-        if (cursorGlow) {
-            cursorGlow.style.left = glowX + 'px';
-            cursorGlow.style.top  = glowY + 'px';
-        }
+    let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2;
+    let glowX = mouseX, glowY = mouseY;
+    document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+    (function animateCursor() {
+        glowX += (mouseX - glowX) * 0.08;
+        glowY += (mouseY - glowY) * 0.08;
+        if (cursorGlow) { cursorGlow.style.left = glowX + 'px'; cursorGlow.style.top = glowY + 'px'; }
         requestAnimationFrame(animateCursor);
-    }
-    animateCursor();
-
-    // ==========================================================================
-    // DOM Element References
-    // ==========================================================================
-    const urlInput           = document.getElementById('urlInput');
-    const scrapeBtn        = document.getElementById('scrapeBtn');
-    const loader           = document.getElementById('loader');
-    const resultsSection   = document.getElementById('resultsSection');
-    const imageGrid        = document.getElementById('imageGrid');
-    const imageCount       = document.getElementById('imageCount');
-    const downloadBtn      = document.getElementById('downloadBtn');
-    const downloadZipBtn   = document.getElementById('downloadZipBtn');
-    const autoscrollToggle = document.getElementById('autoscrollToggle');
-    const filterSelect     = document.getElementById('filterSelect');
-    
-    // Count Button & Panel
-    const countBtn         = document.getElementById('countBtn');
-    const countPanel       = document.getElementById('countPanel');
-    const countTotal       = document.getElementById('countTotal');
-    const countMethodBadge = document.getElementById('countMethodBadge');
-    const countBreakdown   = document.getElementById('countBreakdown');
-    const countNote        = document.getElementById('countNote');
-    const countDismissBtn  = document.getElementById('countDismissBtn');
-    
-    // Theme Switch
-    const themeToggleBtn   = document.getElementById('themeToggleBtn');
-    
-    // Settings API configuration
-    const settingsToggleBtn = document.getElementById('settingsToggleBtn');
-    const settingsDropdown  = document.getElementById('settingsDropdown');
-    const backendUrlInput   = document.getElementById('backendUrlInput');
-
-    // ─── Backend URL Configuration ──────────────────────────────────────────
-    // ALWAYS use the Render backend. Overwrite localStorage to fix other-laptop issues.
-    const DEFAULT_BACKEND_URL = 'https://image-scraper-pro.onrender.com';
-    localStorage.setItem('imageScraperBackendUrl', DEFAULT_BACKEND_URL);
-    backendUrlInput.value = DEFAULT_BACKEND_URL;
-
-    // Toggle Settings Dropdown
-    settingsToggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        settingsDropdown.classList.toggle('hidden');
-    });
-
-    // Close Dropdown on outside click
-    document.addEventListener('click', (e) => {
-        if (settingsDropdown && !settingsDropdown.contains(e.target) && e.target !== settingsToggleBtn) {
-            settingsDropdown.classList.add('hidden');
-        }
-    });
-
-    settingsDropdown.addEventListener('click', (e) => e.stopPropagation());
-
-    // Save Backend URL on input changes (still allows manual override)
-    backendUrlInput.addEventListener('change', () => {
-        let val = backendUrlInput.value.trim().replace(/\/+$/, '');
-        if (!val) val = DEFAULT_BACKEND_URL;
-        backendUrlInput.value = val;
-        localStorage.setItem('imageScraperBackendUrl', val);
-    });
-
-    // Helper to get fully qualified API URL
-    function getApiUrl(endpoint) {
-        let base = (backendUrlInput.value || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, '');
-        return `${base}${endpoint}`;
-    }
-
-    // ─── Wake-up Ping Helper ─────────────────────────────────────────────────
-    // Render free tier sleeps after 15 min inactivity. When sleeping, first
-    // request returns an HTML wakeup page — NOT JSON. This function:
-    //  1. Pings /health first (fast, ~1s)
-    //  2. If sleeping (HTML returned) shows countdown + auto-retries after 38s
-    async function pingBackendAwake() {
-        try {
-            const r = await fetch(getApiUrl('/health'), { method: 'GET', cache: 'no-store' });
-            const ct = r.headers.get('content-type') || '';
-            if (ct.includes('application/json')) {
-                const j = await r.json();
-                return j.status === 'ok'; // true = awake
-            }
-        } catch (e) { /* network error = still sleeping */ }
-        return false;
-    }
-
-    // ─── Auto-Wake + Retry Scrape ────────────────────────────────────────────
-    async function performScrape(url, autoscroll, isRetry = false) {
-        const loaderMsg = loader.querySelector('p');
-
-        try {
-            const response = await fetch(getApiUrl('/api/scrape'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, autoscroll })
-            });
-
-            // Guard: check content-type BEFORE calling .json()
-            const contentType = response.headers.get('content-type') || '';
-            if (!contentType.includes('application/json')) {
-                // Got HTML (Render waking up) or unknown response
-                throw new Error('SLEEPING');
-            }
-
-            const data = await response.json();
-            if (data.error) throw new Error(data.error);
-
-            return data;
-        } catch (err) {
-            const isSleeping = err.message === 'SLEEPING' || err.name === 'SyntaxError';
-
-            if (isSleeping && !isRetry) {
-                // Backend is sleeping — show countdown and auto-retry
-                let secsLeft = 38;
-                const countInterval = setInterval(() => {
-                    secsLeft--;
-                    if (loaderMsg) {
-                        loaderMsg.textContent = `⏳ Backend is waking up (free server)... auto-retrying in ${secsLeft}s`;
-                    }
-                }, 1000);
-
-                await new Promise(resolve => setTimeout(resolve, 38000));
-                clearInterval(countInterval);
-
-                if (loaderMsg) loaderMsg.textContent = '🔄 Retrying scrape now...';
-                return await performScrape(url, autoscroll, true); // one retry
-            }
-
-            // All other errors (or retry also failed)
-            if (isSleeping) {
-                throw new Error('Backend server is still starting up. Please wait 60 seconds and try again.');
-            }
-            throw err;
-        }
-    }
-    
-    // Selection Bar
-    const selectionBar     = document.getElementById('selectionBar');
-    const selectionInfo    = document.getElementById('selectionInfo');
-    const selectAllBtn     = document.getElementById('selectAllBtn');
-    const clearSelectionBtn= document.getElementById('clearSelectionBtn');
-    
-    // Download Modal (Popup)
-    const downloadModal       = document.getElementById('downloadModal');
-    const downloadModalTitle  = document.getElementById('downloadModalTitle');
-    const downloadModalStatus = document.getElementById('downloadModalStatus');
-    const progressBarFill     = document.getElementById('progressBarFill');
-    const statProgress        = document.getElementById('statProgress');
-    const statSpeed           = document.getElementById('statSpeed');
-    const statEta             = document.getElementById('statEta');
-    const downloadLog         = document.getElementById('downloadLog');
-    const cancelDownloadBtn   = document.getElementById('cancelDownloadBtn');
-    
-    // Lightbox Carousel
-    const lightboxModal       = document.getElementById('lightboxModal');
-    const lightboxTitle       = document.getElementById('lightboxTitle');
-    const lightboxImg         = document.getElementById('lightboxImg');
-    const lightboxCloseBtn    = document.getElementById('lightboxCloseBtn');
-    const lightboxPrevBtn     = document.getElementById('lightboxPrevBtn');
-    const lightboxNextBtn     = document.getElementById('lightboxNextBtn');
-    const lightboxDownloadBtn = document.getElementById('lightboxDownloadBtn');
-    const lightboxMeta        = document.getElementById('lightboxMeta');
-    const lightboxCounter     = document.getElementById('lightboxCounter');
-
-    // ==========================================================================
-    // State Management
-    // ==========================================================================
-    let allImages       = [];
-    let filteredImages  = [];
-    let selectedUrls    = new Set();
-    let currentLightboxIdx = -1;
-    
-    // Downloader control state
-    let downloadAborted = false;
-    let activeDownloads = 0;
-
-    // ─── Silent Background Pre-Warm ───────────────────────────────────────────
-    // Silently ping /health on page load so Render wakes up BEFORE user scrapes.
-    // This dramatically reduces wait time on first scrape.
-    (async () => {
-        try {
-            await fetch(getApiUrl('/health'), { method: 'GET', cache: 'no-store' });
-        } catch (e) { /* silent — backend is sleeping, will be handled later */ }
     })();
 
     // ==========================================================================
-    // Theme Switcher Controller
+    // DOM REFS
+    // ==========================================================================
+    const urlInput           = document.getElementById('urlInput');
+    const scrapeBtn          = document.getElementById('scrapeBtn');
+    const loader             = document.getElementById('loader');
+    const loaderMsg          = document.getElementById('loaderMsg');
+    const resultsSection     = document.getElementById('resultsSection');
+    const imageGrid          = document.getElementById('imageGrid');
+    const imageCount         = document.getElementById('imageCount');
+    const downloadBtn        = document.getElementById('downloadBtn');
+    const downloadZipBtn     = document.getElementById('downloadZipBtn');
+    const autoscrollToggle   = document.getElementById('autoscrollToggle');
+    const filterSelect       = document.getElementById('filterSelect');
+    const countBtn           = document.getElementById('countBtn');
+    const countPanel         = document.getElementById('countPanel');
+    const countTotal         = document.getElementById('countTotal');
+    const countMethodBadge   = document.getElementById('countMethodBadge');
+    const countBreakdown     = document.getElementById('countBreakdown');
+    const countNote          = document.getElementById('countNote');
+    const countDismissBtn    = document.getElementById('countDismissBtn');
+    const themeToggleBtn     = document.getElementById('themeToggleBtn');
+    const selectionBar       = document.getElementById('selectionBar');
+    const selectionInfo      = document.getElementById('selectionInfo');
+    const selectAllBtn       = document.getElementById('selectAllBtn');
+    const clearSelectionBtn  = document.getElementById('clearSelectionBtn');
+    const downloadModal      = document.getElementById('downloadModal');
+    const downloadModalTitle = document.getElementById('downloadModalTitle');
+    const downloadModalStatus= document.getElementById('downloadModalStatus');
+    const progressBarFill    = document.getElementById('progressBarFill');
+    const statProgress       = document.getElementById('statProgress');
+    const statSpeed          = document.getElementById('statSpeed');
+    const statEta            = document.getElementById('statEta');
+    const downloadLog        = document.getElementById('downloadLog');
+    const cancelDownloadBtn  = document.getElementById('cancelDownloadBtn');
+    const lightboxModal      = document.getElementById('lightboxModal');
+    const lightboxTitle      = document.getElementById('lightboxTitle');
+    const lightboxImg        = document.getElementById('lightboxImg');
+    const lightboxSpinner    = document.getElementById('lightboxSpinner');
+    const lightboxCloseBtn   = document.getElementById('lightboxCloseBtn');
+    const lightboxPrevBtn    = document.getElementById('lightboxPrevBtn');
+    const lightboxNextBtn    = document.getElementById('lightboxNextBtn');
+    const lightboxDownloadBtn= document.getElementById('lightboxDownloadBtn');
+    const lightboxMeta       = document.getElementById('lightboxMeta');
+    const lightboxCounter    = document.getElementById('lightboxCounter');
+    const settingsToggleBtn  = document.getElementById('settingsToggleBtn');
+    const settingsDropdown   = document.getElementById('settingsDropdown');
+    const toastContainer     = document.getElementById('toastContainer');
+
+    // ==========================================================================
+    // TOAST NOTIFICATION SYSTEM
+    // ==========================================================================
+    /**
+     * Show a non-blocking toast notification.
+     * @param {string} message
+     * @param {'success'|'error'|'info'} type
+     * @param {number} duration ms before auto-dismiss
+     */
+    function showToast(message, type = 'info', duration = 3800) {
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.innerHTML = `<span class="toast-dot"></span><span>${message}</span>`;
+        toastContainer.appendChild(toast);
+        setTimeout(() => {
+            toast.classList.add('toast-out');
+            toast.addEventListener('animationend', () => toast.remove(), { once: true });
+        }, duration);
+    }
+
+    // ==========================================================================
+    // BACKEND DETECTION — local Python server
+    // ==========================================================================
+    const LOCAL_API = 'http://localhost:5000';
+    let localAvailable = false;
+    let localCheckTs = 0; // timestamp of last check (ms)
+    const LOCAL_CHECK_TTL = 30000; // 30 seconds
+
+    async function checkLocalBackend(force = false) {
+        const now = Date.now();
+        if (!force && (now - localCheckTs) < LOCAL_CHECK_TTL) return; // use cached result
+        localCheckTs = now;
+        try {
+            const r = await fetch(`${LOCAL_API}/api/health`, { signal: AbortSignal.timeout(1500) });
+            localAvailable = r.ok;
+        } catch { localAvailable = false; }
+        updateStatusBadge();
+    }
+    checkLocalBackend(true);
+
+    function updateStatusBadge() {
+        if (!settingsDropdown) return;
+        settingsDropdown.innerHTML = `<div style="font-size:12px;color:var(--text-dim);max-width:260px;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+                <span style="width:8px;height:8px;border-radius:50%;background:${localAvailable ? '#5efb6e' : '#ff5c5c'};display:inline-block;flex-shrink:0;"></span>
+                <strong style="color:var(--text-main);">Local Backend: ${localAvailable ? 'CONNECTED ✅' : 'NOT RUNNING ❌'}</strong>
+            </div>
+            ${localAvailable
+                ? '<span style="color:#5efb6e;">Scraping from your real IP — 1000+ images, no captcha.</span>'
+                : `<span style="color:#ff8844;">Start the local backend:<br>
+                   <code style="font-size:10px;background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px;">cd backend &amp;&amp; python app.py</code></span>`}
+        </div>`;
+        lucide.createIcons();
+    }
+
+    settingsToggleBtn && settingsToggleBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        checkLocalBackend(true);
+        const isHidden = settingsDropdown.classList.contains('settings-dropdown--hidden');
+        if (isHidden) {
+            settingsDropdown.classList.remove('settings-dropdown--hidden');
+        } else {
+            settingsDropdown.classList.add('settings-dropdown--hidden');
+        }
+    });
+    document.addEventListener('click', e => {
+        if (settingsDropdown &&
+            !settingsDropdown.contains(e.target) &&
+            e.target !== settingsToggleBtn &&
+            !settingsToggleBtn.contains(e.target)) {
+            settingsDropdown.classList.add('settings-dropdown--hidden');
+        }
+    });
+
+    // ==========================================================================
+    // STATE
+    // ==========================================================================
+    let allImages = [], filteredImages = [], selectedUrls = new Set();
+    let currentLightboxIdx = -1, downloadAborted = false;
+
+    // ==========================================================================
+    // THEME
     // ==========================================================================
     const savedTheme = localStorage.getItem('theme') || 'dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
     updateThemeUI(savedTheme);
 
     themeToggleBtn.addEventListener('click', () => {
-        const currentTheme = document.documentElement.getAttribute('data-theme');
-        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', nextTheme);
-        localStorage.setItem('theme', nextTheme);
-        updateThemeUI(nextTheme);
+        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+        updateThemeUI(next);
     });
 
     function updateThemeUI(theme) {
-        if (theme === 'light') {
-            themeToggleBtn.innerHTML = '<i data-lucide="moon"></i>';
-        } else {
-            themeToggleBtn.innerHTML = '<i data-lucide="sun"></i>';
-        }
+        themeToggleBtn.innerHTML = theme === 'light' ? '<i data-lucide="moon"></i>' : '<i data-lucide="sun"></i>';
         lucide.createIcons();
     }
 
+    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') scrapeBtn.click(); });
+
     // ==========================================================================
-    // Trigger Scrape on Enter
+    // EMPTY / ERROR STATE HELPERS
     // ==========================================================================
-    urlInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') scrapeBtn.click();
+    function renderEmptyState({ icon = 'image-off', title, body, note = '' }) {
+        return `<div class="empty-state">
+            <div class="empty-state-icon"><i data-lucide="${icon}"></i></div>
+            <p class="empty-state-title">${title}</p>
+            <p class="empty-state-body">${body}</p>
+            ${note ? `<p class="empty-state-note">${note}</p>` : ''}
+        </div>`;
+    }
+
+    // ==========================================================================
+    // SCRAPE — calls local Python backend (real IP, no captcha)
+    // ==========================================================================
+    scrapeBtn.addEventListener('click', async () => {
+        const url = urlInput.value.trim();
+        if (!url) {
+            urlInput.focus();
+            showToast('Please enter a Yandex Images URL', 'error');
+            return;
+        }
+
+        await checkLocalBackend();
+
+        if (!localAvailable) {
+            resultsSection.classList.remove('hidden');
+            loader.classList.add('hidden');
+            imageGrid.innerHTML = renderEmptyState({
+                icon: 'server-off',
+                title: '⚠️ Local Backend Not Running',
+                body: `Yandex blocks cloud/proxy requests. Run the scraper <strong>locally</strong> so it uses your real IP.<br><br>
+                       <strong>1. Open a terminal in the project folder:</strong><br>
+                       <code>cd backend</code><br><br>
+                       <strong>2. Install &amp; run:</strong><br>
+                       <code>pip install flask flask-cors requests</code><br>
+                       <code>python app.py</code>`,
+                note: 'Then click Extract Images again.'
+            });
+            imageCount.textContent = '0 images';
+            lucide.createIcons();
+            return;
+        }
+
+        resultsSection.classList.add('hidden');
+        loader.classList.remove('hidden');
+        imageGrid.innerHTML = '';
+        allImages = []; filteredImages = [];
+        selectedUrls.clear();
+        updateSelectionUI();
+        countPanel.classList.add('hidden');
+
+        const deepMode = autoscrollToggle.checked;
+        loaderMsg.textContent = deepMode
+            ? '⚡ Deep scraping Yandex Images (up to 1000+ images)…'
+            : '⚡ Scraping Yandex Images…';
+
+        try {
+            const res = await fetch(`${LOCAL_API}/api/scrape`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, autoscroll: deepMode }),
+                signal: AbortSignal.timeout(300000) // 5 min max
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            allImages = data.images || [];
+        } catch (err) {
+            loader.classList.add('hidden');
+            resultsSection.classList.remove('hidden');
+            imageGrid.innerHTML = renderEmptyState({
+                icon: 'alert-triangle',
+                title: 'Scrape Failed',
+                body: err.message
+            });
+            imageCount.textContent = '0 images';
+            showToast('Scrape failed: ' + err.message, 'error');
+            lucide.createIcons();
+            return;
+        }
+
+        loader.classList.add('hidden');
+        resultsSection.classList.remove('hidden');
+
+        if (!allImages.length) {
+            imageGrid.innerHTML = renderEmptyState({
+                icon: 'search-x',
+                title: 'No Images Found',
+                body: `Make sure your URL contains a search query:<br>
+                       <code>https://yandex.com/images/search?text=cats</code>`
+            });
+            imageCount.textContent = '0 images';
+            showToast('No images found for this URL', 'info');
+        } else {
+            filterSelect.value = 'all';
+            applyFilter();
+            showToast(`Found ${allImages.length} images!`, 'success');
+        }
+        lucide.createIcons();
     });
 
     // ==========================================================================
-    // COUNT BUTTON — Fast image count via httpx (no browser needed)
+    // COUNT — uses fast /api/count endpoint (page 0 only)
     // ==========================================================================
-    const BUCKET_LABELS = {
-        img_src:   'img[src]',
-        srcset:    'srcset',
-        data_src:  'lazy-load',
-        og_image:  'og:image',
-        link_href: 'linked images',
-        css_bg:    'CSS background',
-    };
-
-    /** Animated count roll-up from 0 → target */
-    function animateCountUp(el, target, durationMs = 900) {
-        const start     = performance.now();
-        const startVal  = 0;
-        const range     = target - startVal;
-        function step(now) {
-            const elapsed  = now - start;
-            const progress = Math.min(elapsed / durationMs, 1);
-            // Ease-out quad
-            const eased    = 1 - (1 - progress) ** 3;
-            el.textContent = Math.round(startVal + range * eased);
-            if (progress < 1) requestAnimationFrame(step);
-        }
-        requestAnimationFrame(step);
+    function animateCount(el, target) {
+        const start = performance.now();
+        (function step(now) {
+            const t = Math.min((now - start) / 900, 1);
+            el.textContent = Math.round(target * (1 - (1 - t) ** 3));
+            if (t < 1) requestAnimationFrame(step);
+        })(performance.now());
     }
 
     countBtn.addEventListener('click', async () => {
         const url = urlInput.value.trim();
         if (!url) { urlInput.focus(); return; }
-
-        // ── Loading state ────────────────────────────────────────────────────
-        // Lucide replaces <i> tags with <svg> on page load, so we must swap
-        // innerHTML instead of trying to mutate a non-existent <i> element.
         countBtn.classList.add('loading');
-        countBtn.innerHTML = '<i data-lucide="loader-2" aria-hidden="true"></i><span class="btn-text">Counting…</span>';
+        countBtn.innerHTML = '<i data-lucide="loader-2"></i><span class="btn-text btn-count-text">Counting…</span>';
         lucide.createIcons();
-
-        // Hide any old result panel
         countPanel.classList.add('hidden');
-
+        await checkLocalBackend();
         try {
-            const resp = await fetch(getApiUrl('/api/count'), {
-                method:  'POST',
+            if (!localAvailable) throw new Error('Local backend not running. Run: cd backend && python app.py');
+            const res = await fetch(`${LOCAL_API}/api/count`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ url }),
+                body: JSON.stringify({ url }),
+                signal: AbortSignal.timeout(30000)
             });
-            const data = await resp.json();
-
+            const data = await res.json();
             if (data.error) throw new Error(data.error);
 
-            // Show panel
+            const total = data.count || 0;
+            const bd    = data.breakdown || {};
+
             countPanel.classList.remove('hidden');
-
-            // Animate the total count roll-up
-            animateCountUp(countTotal, data.total || 0);
-
-            // Method badge
-            const isStatic = (data.method === 'httpx');
-            countMethodBadge.textContent = isStatic ? '⚡ Static scan' : '🖥 Browser render';
-
-            // Breakdown chips
-            countBreakdown.innerHTML = '';
-            const bd = data.breakdown || {};
-            if (Object.keys(bd).length > 0) {
-                Object.entries(bd).forEach(([key, val]) => {
-                    const label = BUCKET_LABELS[key] || key;
-                    const chip  = document.createElement('span');
-                    chip.className = 'count-chip';
-                    chip.innerHTML = `<strong>${val}</strong> ${label}`;
-                    countBreakdown.appendChild(chip);
-                });
-            } else {
-                countBreakdown.innerHTML = '<span class="count-chip">No breakdown available</span>';
-            }
-
-            // Footnote
-            countNote.textContent = data.note
-                ? `ℹ ${data.note} — Deep Scrape may find more via auto-scroll.`
-                : 'Deep Scrape may discover additional images via auto-scroll.';
-
-            lucide.createIcons();
+            animateCount(countTotal, total);
+            countMethodBadge.textContent = '⚡ Local (page 1 only)';
+            countBreakdown.innerHTML = Object.entries(bd).map(([k, v]) =>
+                `<span class="count-chip"><strong>${v}</strong> ${k.toUpperCase()}</span>`
+            ).join('') || '<span class="count-chip">No breakdown</span>';
+            countNote.textContent = `Page 1 only. Enable Deep Scrape to fetch 1000+ images.`;
+            showToast(`${total} images detected on page 1`, 'success');
         } catch (err) {
             countPanel.classList.remove('hidden');
             countTotal.textContent = '?';
             countMethodBadge.textContent = 'Error';
             countBreakdown.innerHTML = '';
-            countNote.textContent = `Could not count: ${err.message}`;
+            // Format error message cleanly
+            const msg = err.message.includes('Failed to fetch') || err.message.includes('NetworkError')
+                ? 'Could not reach local backend. Make sure it is running.'
+                : err.message;
+            countNote.textContent = msg;
+            showToast(msg, 'error');
         } finally {
-            // ── Restore button (same innerHTML-swap approach) ─────────────────
             countBtn.classList.remove('loading');
-            countBtn.innerHTML = '<i data-lucide="hash" aria-hidden="true"></i><span class="btn-text">Count</span>';
+            countBtn.innerHTML = '<i data-lucide="hash"></i><span class="btn-text btn-count-text">Count</span>';
             lucide.createIcons();
         }
     });
-
-    countDismissBtn.addEventListener('click', () => {
-        countPanel.classList.add('hidden');
-    });
+    countDismissBtn.addEventListener('click', () => countPanel.classList.add('hidden'));
 
     // ==========================================================================
-    // Scraping Controller
+    // FILTER
     // ==========================================================================
-    scrapeBtn.addEventListener('click', async () => {
-        const url = urlInput.value.trim();
-        if (!url) return alert('Please enter a valid URL');
-
-        resultsSection.classList.add('hidden');
-        loader.classList.remove('hidden');
-        imageGrid.innerHTML = '';
-        selectedUrls.clear();
-        updateSelectionUI();
-        countPanel.classList.add('hidden');
-
-        const autoscroll = autoscrollToggle.checked;
-        loader.querySelector('p').textContent = autoscroll
-            ? '🔍 Deep scraping with auto-scroll... (may take 20-30s)'
-            : '⚡ Scraping page elements...';
-
-        try {
-            const data = await performScrape(url, autoscroll);
-
-            allImages = data.images;
-            filterSelect.value = 'all';
-            applyFilter();
-
-            loader.classList.add('hidden');
-            resultsSection.classList.remove('hidden');
-            lucide.createIcons();
-        } catch (err) {
-            loader.classList.add('hidden');
-            alert('❌ ' + err.message);
-        }
-    });
-
-    // ==========================================================================
-    // Filtering Controller
-    // ==========================================================================
-    filterSelect.addEventListener('change', () => {
-        applyFilter();
-    });
-
+    filterSelect.addEventListener('change', applyFilter);
     function applyFilter() {
-        const activeFilter = filterSelect.value;
-
-        if (activeFilter === 'all') {
-            filteredImages = allImages;
-        } else if (activeFilter === 'hd') {
-            filteredImages = allImages.filter(img =>
-                (img.width !== 'Original' && img.width >= 1080) ||
-                (img.height !== 'Original' && img.height >= 1080) ||
-                img.alt === 'Highest Quality Asset' ||
-                img.alt === 'Search Source (Original)'
-            );
-        } else {
-            filteredImages = allImages.filter(img => {
-                const ext = img.url.split('.').pop().split('?')[0].toLowerCase();
-                if (activeFilter === 'jpg') return ext === 'jpg' || ext === 'jpeg';
-                return ext === activeFilter;
-            });
-        }
-        imageCount.textContent = `Found ${filteredImages.length} images`;
-        
-        // Clean out selected URLs that are no longer in the filtered set
-        const filteredUrlsSet = new Set(filteredImages.map(img => img.url));
-        selectedUrls.forEach(url => {
-            if (!filteredUrlsSet.has(url)) {
-                selectedUrls.delete(url);
-            }
+        const f = filterSelect.value;
+        if (f === 'all') filteredImages = [...allImages];
+        else if (f === 'hd') filteredImages = allImages.filter(i => i.isHighRes || String(i.width) > 1080);
+        else filteredImages = allImages.filter(i => {
+            const ext = i.url.split('.').pop().split('?')[0].toLowerCase();
+            return f === 'jpg' ? (ext === 'jpg' || ext === 'jpeg') : ext === f;
         });
-        
+
+        const prev = filteredImages.length;
+        imageCount.textContent = `Found ${filteredImages.length} images`;
+
+        // Remove selected URLs that are no longer in the filtered set
+        const fSet = new Set(filteredImages.map(i => i.url));
+        const removed = [];
+        selectedUrls.forEach(u => { if (!fSet.has(u)) { selectedUrls.delete(u); removed.push(u); } });
+        if (removed.length) showToast(`${removed.length} selected image(s) removed by filter`, 'info');
+
         updateSelectionUI();
         displayImages(filteredImages);
     }
 
     // ==========================================================================
-    // Selection Engine / UI Updates
+    // SELECTION
     // ==========================================================================
     function updateSelectionUI() {
-        const count = selectedUrls.size;
-        if (count > 0) {
+        const n = selectedUrls.size;
+        if (n > 0) {
             selectionBar.classList.remove('hidden');
-            selectionInfo.textContent = `${count} image(s) selected`;
-            downloadBtn.querySelector('span').textContent = `Download Selected (${count})`;
-            downloadZipBtn.querySelector('span').textContent = `Download ZIP (${count})`;
+            selectionInfo.textContent = `${n} image${n > 1 ? 's' : ''} selected`;
+            downloadBtn.querySelector('span').textContent = `Download Selected (${n})`;
+            downloadZipBtn.querySelector('span').textContent = `Download ZIP (${n})`;
         } else {
             selectionBar.classList.add('hidden');
-            downloadBtn.querySelector('span').textContent = `Download Files`;
-            downloadZipBtn.querySelector('span').textContent = `Download ZIP`;
+            downloadBtn.querySelector('span').textContent = 'Download Files';
+            downloadZipBtn.querySelector('span').textContent = 'Download ZIP';
         }
     }
 
     selectAllBtn.addEventListener('click', () => {
-        filteredImages.forEach(img => selectedUrls.add(img.url));
+        filteredImages.forEach(i => selectedUrls.add(i.url));
         updateSelectionUI();
-        // Update all cards visually
-        document.querySelectorAll('.img-card').forEach(card => card.classList.add('selected'));
+        document.querySelectorAll('.img-card').forEach(c => c.classList.add('selected'));
     });
 
     clearSelectionBtn.addEventListener('click', () => {
         selectedUrls.clear();
         updateSelectionUI();
-        // Update all cards visually
-        document.querySelectorAll('.img-card').forEach(card => card.classList.remove('selected'));
+        document.querySelectorAll('.img-card').forEach(c => c.classList.remove('selected'));
     });
 
     // ==========================================================================
-    // Display Grid Renderer
+    // DISPLAY
     // ==========================================================================
     function displayImages(images) {
         imageGrid.innerHTML = '';
-        if (images.length === 0) {
+        if (!images.length) {
             imageGrid.innerHTML = `<p style="color:var(--text-dim);grid-column:1/-1;text-align:center;padding:3rem;font-weight:600;">No images match this filter.</p>`;
             return;
         }
-
+        const frag = document.createDocumentFragment();
         images.forEach((img, idx) => {
             const card = document.createElement('div');
-            const isSelected = selectedUrls.has(img.url);
-            card.className = `img-card ${isSelected ? 'selected' : ''}`;
+            card.className = `img-card ${selectedUrls.has(img.url) ? 'selected' : ''}`;
             card.dataset.index = idx;
-
-            const urlLow = img.url.toLowerCase();
-            const hasOrig = urlLow.includes('/orig') || urlLow.includes('/originals/') || urlLow.includes('=s0') || urlLow.includes('original');
-            const isLarge = (img.width && img.width !== 'Original' && img.width > 1000) ||
-                            (img.height && img.height !== 'Original' && img.height > 1000);
-            const isOriginal = (hasOrig || isLarge);
-
-            const displayUrl = img.thumb || img.url;
-            const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
-
+            const safeAlt = (img.alt || 'Image').replace(/"/g, '&quot;');
             card.innerHTML = `
-                <!-- Custom Checkbox overlay -->
-                <div class="card-select-checkbox" title="Select Image">
-                    <i data-lucide="check"></i>
-                </div>
-                
-                <img src="${displayUrl}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='${proxyUrl}';" alt="${img.alt || 'Image'}" loading="lazy">
-                
+                <div class="card-select-checkbox" title="Select"><i data-lucide="check"></i></div>
+                <img src="${img.thumb || img.url}" referrerpolicy="no-referrer"
+                     onerror="this.onerror=null;this.style.opacity='0.2';this.style.filter='grayscale(1)';"
+                     alt="${safeAlt}" loading="lazy">
                 <div class="card-overlay">
-                    <span class="badge ${isOriginal ? 'badge-orig' : 'badge-hq'}">
-                        ${isOriginal ? 'Original' : 'HQ'}
-                    </span>
+                    <span class="badge badge-orig">Original</span>
                     <div class="card-actions">
-                        <button class="btn-mini btn-preview" title="View Full Details">
-                            <i data-lucide="maximize-2"></i>
-                        </button>
+                        <button class="btn-mini btn-preview" title="Preview"><i data-lucide="maximize-2"></i></button>
                     </div>
-                </div>
-            `;
-
-            // Event Listeners for Cards
-            card.addEventListener('click', (e) => {
-                const target = e.target;
-                
-                // If clicked preview button, trigger Lightbox
-                if (target.closest('.btn-preview')) {
-                    e.stopPropagation();
-                    openLightbox(idx);
-                    return;
-                }
-                
-                // Otherwise click toggles selection
+                </div>`;
+            card.addEventListener('click', e => {
+                if (e.target.closest('.btn-preview')) { e.stopPropagation(); openLightbox(idx); return; }
                 e.preventDefault();
-                toggleCardSelection(card, img.url);
+                if (selectedUrls.has(img.url)) { selectedUrls.delete(img.url); card.classList.remove('selected'); }
+                else { selectedUrls.add(img.url); card.classList.add('selected'); }
+                updateSelectionUI();
             });
-
-            imageGrid.appendChild(card);
+            frag.appendChild(card);
         });
-
+        imageGrid.appendChild(frag);
         lucide.createIcons();
     }
 
-    function toggleCardSelection(card, url) {
-        if (selectedUrls.has(url)) {
-            selectedUrls.delete(url);
-            card.classList.remove('selected');
-        } else {
-            selectedUrls.add(url);
-            card.classList.add('selected');
-        }
-        updateSelectionUI();
-    }
-
     // ==========================================================================
-    // Telemetry Progress Modal Utilities
+    // DOWNLOAD MODAL HELPERS
     // ==========================================================================
-    function showProgressModal(title, initialStatus) {
+    function showModal(title, status) {
         downloadAborted = false;
         downloadModalTitle.textContent = title;
-        downloadModalStatus.textContent = initialStatus;
+        downloadModalStatus.textContent = status;
         progressBarFill.style.width = '0%';
+        progressBarFill.classList.remove('indeterminate');
         statProgress.textContent = '0%';
-        statSpeed.textContent = '0.0 MB/s';
+        statSpeed.textContent = '0 KB/s';
         statEta.textContent = '--:--';
-        downloadLog.innerHTML = `<div class="log-entry">Session initialized. Allocating workers...</div>`;
+        cancelDownloadBtn.textContent = 'Cancel Download';
+        cancelDownloadBtn.className = 'btn-danger';
+        cancelDownloadBtn.disabled = false;
+        downloadLog.innerHTML = '<div class="log-entry">Starting…</div>';
         downloadModal.classList.add('active');
     }
 
-    function addLogEntry(text, type = '') {
-        const entry = document.createElement('div');
-        entry.className = `log-entry ${type}`;
-        entry.textContent = text;
-        downloadLog.appendChild(entry);
+    function log(text, type = '') {
+        const e = document.createElement('div');
+        e.className = `log-entry ${type}`;
+        e.textContent = text;
+        downloadLog.appendChild(e);
         downloadLog.scrollTop = downloadLog.scrollHeight;
     }
 
-    function updateProgressStats(progressPercentage, speedText, etaText) {
-        progressBarFill.style.width = `${progressPercentage}%`;
-        statProgress.textContent = `${Math.round(progressPercentage)}%`;
-        statSpeed.textContent = speedText;
-        statEta.textContent = etaText;
+    function updateStats(pct, speed, eta) {
+        progressBarFill.style.width = pct + '%';
+        statProgress.textContent = Math.round(pct) + '%';
+        statSpeed.textContent = speed;
+        statEta.textContent = eta;
     }
 
+    // Close modal on backdrop click
+    downloadModal.addEventListener('click', e => {
+        if (e.target === downloadModal && !downloadAborted) {
+            downloadModal.classList.remove('active');
+        }
+    });
+
     cancelDownloadBtn.addEventListener('click', () => {
+        if (cancelDownloadBtn.textContent === 'Close Panel') {
+            downloadModal.classList.remove('active');
+            return;
+        }
         downloadAborted = true;
-        addLogEntry('Cancellation request received. Aborting...', 'fail');
-        downloadModalStatus.textContent = 'Cancelling download queue...';
+        log('Aborting…', 'fail');
+        downloadModalStatus.textContent = 'Cancelling…';
         cancelDownloadBtn.disabled = true;
     });
 
-    // ==========================================================================
-    // JS CONCURRENCY PARALLEL DOWNLOADER (Individual Files)
-    // ==========================================================================
-    downloadBtn.addEventListener('click', async () => {
-        // Determine targets: selected set or filtered images
-        const targets = selectedUrls.size > 0 
-            ? filteredImages.filter(img => selectedUrls.has(img.url))
-            : filteredImages;
-            
-        if (targets.length === 0) return;
-
-        const confirmDownload = confirm(`Download ${targets.length} individual images concurrently?`);
-        if (!confirmDownload) return;
-
-        cancelDownloadBtn.disabled = false;
-        showProgressModal('Downloading Individual Assets', `Processing 0 of ${targets.length}...`);
-
-        const CONCURRENCY = 5; // 5 parallel downloads at a time
-        let completed = 0;
-        let success = 0;
-        let downloadedBytes = 0;
-        let currentIndex = 0;
-        const startTime = Date.now();
-        
-        // Active worker promises
-        const workers = [];
-
-        async function worker() {
-            while (currentIndex < targets.length && !downloadAborted) {
-                const myIndex = currentIndex++;
-                const img = targets[myIndex];
-                
-                try {
-                    downloadModalStatus.textContent = `Downloading ${completed + 1} of ${targets.length}...`;
-                    const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
-                    
-                    const timeStart = Date.now();
-                    const response = await fetch(proxyUrl);
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    
-                    const blob = await response.blob();
-                    const duration = (Date.now() - timeStart) / 1000;
-                    downloadedBytes += blob.size;
-                    
-                    // Local browser download trigger
-                    const objUrl = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = objUrl;
-                    let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
-                    if (!['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) ext = 'jpg';
-                    a.download = `${Math.random().toString(36).substring(2, 12)}.${ext}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(objUrl);
-                    a.remove();
-                    
-                    success++;
-                    addLogEntry(`✔ File ${myIndex + 1} completed (${(blob.size / 1024).toFixed(1)} KB) in ${duration.toFixed(1)}s`, 'success');
-                } catch (err) {
-                    console.error('Download failed for:', img.url, err);
-                    addLogEntry(`✖ File ${myIndex + 1} failed: ${err.message}`, 'fail');
-                } finally {
-                    completed++;
-                    
-                    // Live Telemetry Calculations
-                    const elapsed = (Date.now() - startTime) / 1000;
-                    const speed = downloadedBytes / elapsed; // bytes/sec
-                    
-                    // Format Speed
-                    let speedText = '0.0 MB/s';
-                    if (speed < 1024) speedText = `${speed.toFixed(0)} B/s`;
-                    else if (speed < 1024 * 1024) speedText = `${(speed / 1024).toFixed(1)} KB/s`;
-                    else speedText = `${(speed / (1024 * 1024)).toFixed(1)} MB/s`;
-
-                    // Format ETA (Rolling file estimates)
-                    let etaText = '--:--';
-                    if (completed > 0) {
-                        const avgTimePerFile = elapsed / completed;
-                        const remainingFiles = targets.length - completed;
-                        const etaSecs = avgTimePerFile * remainingFiles;
-                        
-                        if (etaSecs < 60) etaText = `${Math.ceil(etaSecs)}s`;
-                        else {
-                            const mins = Math.floor(etaSecs / 60);
-                            const secs = Math.ceil(etaSecs % 60);
-                            etaText = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-                        }
-                    }
-
-                    const progressPercent = (completed / targets.length) * 100;
-                    updateProgressStats(progressPercent, speedText, etaText);
-                }
-            }
-        }
-
-        // Spawn initial parallel workers
-        const workerCount = Math.min(CONCURRENCY, targets.length);
-        for (let i = 0; i < workerCount; i++) {
-            workers.push(worker());
-        }
-
-        // Wait for all workers to exhaust queue
-        await Promise.all(workers);
-
-        if (downloadAborted) {
-            addLogEntry('Download queue halted by user request.', 'fail');
-            downloadModalStatus.textContent = 'Download cancelled.';
-        } else {
-            addLogEntry(`Finished! Completed ${success} of ${targets.length} downloads successfully.`, 'success');
-            downloadModalStatus.textContent = 'All downloads completed!';
-        }
-        
-        statEta.textContent = 'Finished';
+    function doneModal(successMsg) {
         cancelDownloadBtn.textContent = 'Close Panel';
         cancelDownloadBtn.className = 'btn-primary';
         cancelDownloadBtn.disabled = false;
-        
-        // Temporarily redefine the cancel click to just close
-        const closeHandler = () => {
-            downloadModal.classList.remove('active');
-            cancelDownloadBtn.textContent = 'Cancel Download';
-            cancelDownloadBtn.className = 'btn-danger';
-            cancelDownloadBtn.removeEventListener('click', closeHandler);
-        };
-        cancelDownloadBtn.addEventListener('click', closeHandler);
+        if (successMsg) showToast(successMsg, 'success');
+    }
+
+    // ==========================================================================
+    // DOWNLOAD — via local backend (handles CORS for Yandex CDN images)
+    // ==========================================================================
+    async function fetchImageBlob(url) {
+        // Try direct first (many CDN images are CORS-open)
+        try {
+            const r = await fetch(url, { referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(8000) });
+            if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
+        } catch {}
+        // Fall back to local backend proxy
+        try {
+            const r = await fetch(`${LOCAL_API}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(15000) });
+            if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
+        } catch {}
+        return null;
+    }
+
+    downloadBtn.addEventListener('click', async () => {
+        const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
+        if (!targets.length) return;
+
+        // Modal-based confirmation (no native confirm() dialog)
+        showModal(`Download ${targets.length} Images`, `Preparing to download ${targets.length} files individually…`);
+        log(`Queued ${targets.length} images for download.`, 'success');
+
+        let done = 0, ok = 0, bytes = 0, idx = 0;
+        const t0 = Date.now();
+
+        async function worker() {
+            while (idx < targets.length && !downloadAborted) {
+                const i = idx++, img = targets[i];
+                try {
+                    const blob = await fetchImageBlob(img.url);
+                    if (!blob) throw new Error('Empty response');
+                    bytes += blob.size;
+                    let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
+                    if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `img_${String(i + 1).padStart(4, '0')}.${ext}`;
+                    document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+                    ok++;
+                    log(`✔ img_${i+1} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
+                } catch(e) {
+                    log(`✖ img_${i+1}: ${e.message}`, 'fail');
+                }
+                done++;
+                const el = (Date.now() - t0) / 1000;
+                const sp = bytes / Math.max(el, 0.1);
+                const spTxt = sp < 1048576 ? `${(sp / 1024).toFixed(1)} KB/s` : `${(sp / 1048576).toFixed(1)} MB/s`;
+                const rem = done > 0 ? (el / done) * (targets.length - done) : 0;
+                updateStats((done / targets.length) * 100, spTxt, rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem / 60)}m ${Math.ceil(rem % 60)}s`);
+                downloadModalStatus.textContent = `${done} / ${targets.length} done…`;
+            }
+        }
+
+        await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
+        log(`✅ Done: ${ok}/${targets.length} saved.`, 'success');
+        downloadModalStatus.textContent = 'Complete!';
+        updateStats(100, '—', 'Done');
+        doneModal(`Downloaded ${ok} image${ok !== 1 ? 's' : ''} successfully!`);
     });
 
     // ==========================================================================
-    // FAST SERVER-SIDE ZIP ENGINE WITH FETCH STREAM TELEMETRY
+    // ZIP DOWNLOAD — send URLs to backend, get back a zip file
     // ==========================================================================
     downloadZipBtn.addEventListener('click', async () => {
-        const targets = selectedUrls.size > 0 
-            ? filteredImages.filter(img => selectedUrls.has(img.url)).map(img => img.url)
-            : filteredImages.map(img => img.url);
-            
-        if (targets.length === 0) return;
+        const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
+        if (!targets.length) return;
+        if (!localAvailable) {
+            showToast('Local backend not running. Run: cd backend && python app.py', 'error');
+            return;
+        }
 
-        cancelDownloadBtn.disabled = false;
-        showProgressModal('Compiling ZIP Archive', 'Sending request to parallel compilation server...');
-        addLogEntry('Parallel worker pool spinning up on backend...', 'success');
+        showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
+        log(`Downloading ${targets.length} images via backend (12 parallel workers)…`, 'success');
+
+        // Show indeterminate progress while backend is working
+        progressBarFill.classList.add('indeterminate');
+        updateStats(0, '—', 'Working…');
 
         try {
-            const startTime = Date.now();
-            
-            const response = await fetch(getApiUrl('/api/download'), {
+            downloadModalStatus.textContent = `Downloading ${targets.length} images…`;
+
+            const res = await fetch(`${LOCAL_API}/api/download`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls: targets })
+                body: JSON.stringify({ urls: targets.map(i => i.url) }),
+                signal: AbortSignal.timeout(300000)
             });
+            if (!res.ok) throw new Error(`Backend error: ${res.status}`);
 
-            if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
-            
-            addLogEntry('Backend parallel compilation complete. Streaming zip archive to browser...', 'success');
-            downloadModalStatus.textContent = 'Streaming ZIP archive...';
-            
-            const reader = response.body.getReader();
-            const contentLength = +response.headers.get('Content-Length') || 0;
-            
-            let receivedLength = 0;
-            let chunks = [];
-            
-            // Read streamed response body chunks
-            while (true) {
-                if (downloadAborted) {
-                    reader.cancel();
-                    throw new Error('Streaming cancelled by user');
-                }
-                
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                chunks.push(value);
-                receivedLength += value.length;
-                
-                const elapsed = (Date.now() - startTime) / 1000;
-                const speed = receivedLength / elapsed;
-                
-                // Speed format
-                let speedText = '0.0 MB/s';
-                if (speed < 1024 * 1024) speedText = `${(speed / 1024).toFixed(1)} KB/s`;
-                else speedText = `${(speed / (1024 * 1024)).toFixed(1)} MB/s`;
+            progressBarFill.classList.remove('indeterminate');
+            downloadModalStatus.textContent = 'Packaging ZIP…';
+            updateStats(80, '—', 'Packaging…');
 
-                // Progress percentage (if Content-Length is provided)
-                let percent = 0;
-                let etaText = '--:--';
-                
-                if (contentLength) {
-                    percent = (receivedLength / contentLength) * 100;
-                    const remainingBytes = contentLength - receivedLength;
-                    const etaSecs = remainingBytes / speed;
-                    etaText = etaSecs < 60 ? `${Math.ceil(etaSecs)}s` : `${Math.floor(etaSecs / 60)}m`;
-                } else {
-                    // Fallback visual pulse progress
-                    percent = Math.min((receivedLength / (5 * 1024 * 1024)) * 100, 99); // Estimate progress up to 5MB
-                    etaText = 'Streaming';
-                }
-                
-                downloadModalStatus.textContent = `Received ${(receivedLength / (1024 * 1024)).toFixed(2)} MB...`;
-                updateProgressStats(percent, speedText, etaText);
-            }
+            const blob = await res.blob();
+            progressBarFill.classList.remove('indeterminate');
+            updateStats(100, '—', 'Done');
 
-            // Reconstruct downloaded chunks into blob
-            const blob = new Blob(chunks, { type: 'application/zip' });
-            const objUrl = window.URL.createObjectURL(blob);
-            
             const a = document.createElement('a');
-            a.href = objUrl;
-            a.download = `scraper_assets_${Date.now().toString().slice(-6)}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(objUrl);
-            a.remove();
-            
-            addLogEntry(`✔ ZIP compiled and downloaded successfully (${(blob.size / (1024 * 1024)).toFixed(2)} MB)`, 'success');
-            downloadModalStatus.textContent = 'ZIP download completed!';
-            updateProgressStats(100, '0.0 B/s', 'Finished');
-        } catch (err) {
-            console.error('ZIP compilation download failed:', err);
-            addLogEntry(`✖ Archive creation failed: ${err.message}`, 'fail');
-            downloadModalStatus.textContent = downloadAborted ? 'ZIP compilation aborted.' : 'Error creating ZIP.';
-        } finally {
-            cancelDownloadBtn.textContent = 'Close Panel';
-            cancelDownloadBtn.className = 'btn-primary';
-            cancelDownloadBtn.disabled = false;
-            
-            const closeHandler = () => {
-                downloadModal.classList.remove('active');
-                cancelDownloadBtn.textContent = 'Cancel Download';
-                cancelDownloadBtn.className = 'btn-danger';
-                cancelDownloadBtn.removeEventListener('click', closeHandler);
-            };
-            cancelDownloadBtn.addEventListener('click', closeHandler);
+            a.href = URL.createObjectURL(blob);
+            a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
+            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+
+            const sizeMB = (blob.size / 1048576).toFixed(2);
+            log(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
+            downloadModalStatus.textContent = 'ZIP downloaded!';
+            doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
+        } catch(e) {
+            progressBarFill.classList.remove('indeterminate');
+            log('ZIP failed: ' + e.message, 'fail');
+            downloadModalStatus.textContent = 'Error: ' + e.message;
+            showToast('ZIP download failed: ' + e.message, 'error');
+            doneModal(null);
         }
     });
 
     // ==========================================================================
-    // INTERACTIVE CAROUSEL LIGHTBOX & INSPECTOR
+    // LIGHTBOX
     // ==========================================================================
-    function openLightbox(index) {
-        currentLightboxIdx = index;
-        updateLightboxContent();
+    function openLightbox(i) {
+        currentLightboxIdx = i;
+        updateLightbox();
         lightboxModal.classList.add('active');
-        document.body.style.overflow = 'hidden'; // Lock base scroll
+        document.body.style.overflow = 'hidden';
     }
 
     function closeLightbox() {
         lightboxModal.classList.remove('active');
-        document.body.style.overflow = ''; // Restore base scroll
-        lightboxImg.src = ''; // Deallocate image link memory
+        document.body.style.overflow = '';
+        lightboxImg.src = '';
+        lightboxImg.classList.remove('loaded');
+        lightboxSpinner.classList.remove('hidden');
     }
 
-    function updateLightboxContent() {
+    function updateLightbox() {
         if (currentLightboxIdx < 0 || currentLightboxIdx >= filteredImages.length) return;
-        
         const img = filteredImages[currentLightboxIdx];
-        const proxyUrl = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
-        
-        // Direct load with proxy fallback
-        lightboxImg.src = img.url;
+
+        // Show spinner while loading
+        lightboxImg.classList.remove('loaded');
+        lightboxSpinner.classList.remove('hidden');
+
+        lightboxImg.onload = () => {
+            lightboxImg.classList.add('loaded');
+            lightboxSpinner.classList.add('hidden');
+        };
         lightboxImg.onerror = function() {
             this.onerror = null;
-            this.src = proxyUrl;
+            this.src = img.thumb || img.url;
+            lightboxSpinner.classList.add('hidden');
+            lightboxImg.classList.add('loaded');
         };
-        lightboxTitle.textContent = img.alt || 'High-Resolution Visual Asset';
+
+        lightboxImg.setAttribute('referrerpolicy', 'no-referrer');
+        lightboxImg.src = img.url;
+
+        lightboxTitle.textContent = img.alt || 'Yandex Image';
         lightboxCounter.textContent = `${currentLightboxIdx + 1} of ${filteredImages.length}`;
-        
-        // Initial meta text
+
         let ext = img.url.split('.').pop().split('?')[0].toUpperCase();
-        if (ext.length > 4 || !ext.match(/^[A-Z0-9]+$/)) ext = 'JPG/PNG';
-        lightboxMeta.textContent = `Dimensions: ${img.width} x ${img.height} | Type: ${ext}`;
-        
-        // Fetch real dimensions if not populated
-        if (img.width === 'Original' || !img.width) {
-            const tempImg = new Image();
-            tempImg.onload = function() {
-                lightboxMeta.textContent = `Dimensions: ${tempImg.naturalWidth} x ${tempImg.naturalHeight} | Type: ${ext}`;
-                // Cache it locally so subsequent loads are immediate
-                img.width = tempImg.naturalWidth;
-                img.height = tempImg.naturalHeight;
-            };
-            tempImg.src = proxyUrl;
-        }
+        if (ext.length > 4) ext = 'IMG';
+        lightboxMeta.textContent = `Original | ${ext}`;
     }
 
-    // Lightbox click events
     lightboxCloseBtn.addEventListener('click', closeLightbox);
-    
+
     lightboxPrevBtn.addEventListener('click', () => {
-        if (filteredImages.length <= 1) return;
         currentLightboxIdx = (currentLightboxIdx - 1 + filteredImages.length) % filteredImages.length;
-        updateLightboxContent();
+        updateLightbox();
     });
 
     lightboxNextBtn.addEventListener('click', () => {
-        if (filteredImages.length <= 1) return;
         currentLightboxIdx = (currentLightboxIdx + 1) % filteredImages.length;
-        updateLightboxContent();
+        updateLightbox();
     });
 
-    lightboxDownloadBtn.addEventListener('click', () => {
-        if (currentLightboxIdx < 0 || currentLightboxIdx >= filteredImages.length) return;
+    lightboxDownloadBtn.addEventListener('click', async () => {
         const img = filteredImages[currentLightboxIdx];
-        
-        // Trigger single download trigger
-        const a = document.createElement('a');
-        a.href = getApiUrl(`/api/proxy_download?url=${encodeURIComponent(img.url)}`);
-        let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
-        if (!['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) ext = 'jpg';
-        a.download = `preview_download_${Date.now().toString().slice(-4)}.${ext}`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-    });
-
-    // Close lightbox on clicking outside image container
-    lightboxModal.addEventListener('click', (e) => {
-        // Close only if clicking the bare lightbox backdrop, or the body area
-        // but NOT on the image container, nav buttons, header or footer controls
-        const clickedBackdrop = e.target === lightboxModal;
-        const clickedEmptyBody = (
-            e.target.closest('.lightbox-body') &&
-            !e.target.closest('.lightbox-image-container') &&
-            !e.target.closest('.btn-nav')
-        );
-        if (clickedBackdrop || clickedEmptyBody) {
-            closeLightbox();
+        if (!img) return;
+        showToast('Fetching image…', 'info', 2000);
+        const blob = await fetchImageBlob(img.url);
+        if (blob) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `yandex_${Date.now()}.jpg`;
+            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+            showToast('Image saved!', 'success');
+        } else {
+            window.open(img.url, '_blank');
         }
     });
 
-    // ==========================================================================
-    // Keyboard Controller (Lightbox Arrows and Escape)
-    // ==========================================================================
-    document.addEventListener('keydown', (e) => {
+    // Close on backdrop click
+    lightboxModal.addEventListener('click', e => {
+        if (e.target === lightboxModal) closeLightbox();
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', e => {
         if (!lightboxModal.classList.contains('active')) return;
-        
-        if (e.key === 'Escape') {
-            closeLightbox();
-        } else if (e.key === 'ArrowLeft') {
-            lightboxPrevBtn.click();
-        } else if (e.key === 'ArrowRight') {
-            lightboxNextBtn.click();
-        }
+        if (e.key === 'Escape') closeLightbox();
+        else if (e.key === 'ArrowLeft') lightboxPrevBtn.click();
+        else if (e.key === 'ArrowRight') lightboxNextBtn.click();
     });
+
+    // Touch/swipe support for lightbox on mobile
+    let touchStartX = 0, touchStartY = 0;
+    lightboxModal.addEventListener('touchstart', e => {
+        touchStartX = e.changedTouches[0].clientX;
+        touchStartY = e.changedTouches[0].clientY;
+    }, { passive: true });
+
+    lightboxModal.addEventListener('touchend', e => {
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        const dy = e.changedTouches[0].clientY - touchStartY;
+        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+            if (dx < 0) lightboxNextBtn.click(); // swipe left → next
+            else        lightboxPrevBtn.click(); // swipe right → prev
+        }
+    }, { passive: true });
 });

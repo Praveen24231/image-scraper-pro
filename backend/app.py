@@ -1,685 +1,280 @@
-import os
-import sys
-import asyncio
-import uuid
-import zipfile
-import io
-import requests
-import httpx
+"""
+Fast Yandex Image Scraper Backend
+- No Playwright/browser needed
+- Scrapes via requests from your real IP (no captcha)
+- 30 images/page × 34 pages = 1000+ images in parallel
+- Run: python app.py
+"""
 import re
-from flask import Flask, request, jsonify, send_file, send_from_directory
+import io
+import zipfile
+import concurrent.futures
+from html import unescape
+from urllib.parse import urlparse, urlencode, parse_qs
+
+import requests
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
-from urllib.parse import unquote, urlparse, parse_qs, urljoin
-from requests.utils import requote_uri
 
-# Fix Windows asyncio event loop policy for Playwright compatibility
-# Without this, Playwright crashes on Windows with "no running event loop" errors
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-def run_async(coro):
-    """Run an async coroutine safely in a brand-new event loop.
-    Flask routes are synchronous; Playwright needs its own fresh loop on Windows.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-# Safe print helper to prevent terminal encoding crashes on Windows (cp1252/charmap)
-def print(*args, **kwargs):
-    import builtins
-    try:
-        builtins.print(*args, **kwargs)
-    except UnicodeEncodeError:
-        safe_args = [str(arg).encode('ascii', errors='replace').decode('ascii') for arg in args]
-        builtins.print(*safe_args, **kwargs)
-
-def normalize_url(url):
-    if not url: return url
-    if url.startswith('//'): url = 'https:' + url
-    
-    # 1. Yandex CDN URLs (avatars.mds.yandex.net)
-    if 'avatars.mds.yandex.net' in url or 'get-shedevrum' in url:
-        # Standard pattern: .../get-XXX/123/abc/suffix
-        if '/get-' in url:
-            parts = url.split('/')
-            if len(parts) >= 6:
-                # The last part is the size/optimization (e.g., 'small', '300x300', 'orig')
-                last_part_full = parts[-1]
-                # Remove any query parameters from the last part
-                last_part = last_part_full.split('?')[0]
-                
-                # Check if it's already original or if it's a known size that can be upgraded
-                if last_part not in ['orig', 'original']:
-                    # We can safely replace the last part with 'orig' for most Yandex 'get-' services
-                    parts[-1] = 'orig'
-                    url = '/'.join(parts)
-        elif '/get-shedevrum/' in url:
-            if not url.endswith('/orig') and not '?' in url.split('/')[-1]:
-                url = url.rstrip('/') + '/orig'
-
-    # 2. Pinterest: /736x/ -> /originals/
-    if 'pinimg.com' in url:
-        if '/736x/' in url:
-            url = url.replace('/736x/', '/originals/')
-        elif '/236x/' in url:
-            url = url.replace('/236x/', '/originals/')
-
-    # 3. Strip common resizing query parameters from any source URL
-    try:
-        from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        
-        # Common resize/quality params to remove
-        params_to_remove = ['w', 'h', 'width', 'height', 'size', 'quality', 'q', 'resize', 'fit', 'n']
-        modified = False
-        for p in params_to_remove:
-            if p in qs:
-                # Only remove if it's not a critical ID param (usually single letter or short)
-                # But 'w' and 'h' are almost always sizes.
-                del qs[p]
-                modified = True
-        
-        if modified:
-            new_query = urlencode(qs, doseq=True)
-            url = urlunparse(parsed._replace(query=new_query))
-    except Exception:
-        pass
-
-    # 4. Google User Content
-    if 'googleusercontent.com' in url:
-        # Upgrade =s900 or =s400 to =s0 (original) or a large size
-        if '=' in url.split('/')[-1]:
-            url = re.sub(r'=s\d+.*$', '=s0', url)
-        else:
-            url = re.sub(r'\/s\d+(-c)?\/', '/s4096/', url)
-
-    return url
-
-app = Flask(__name__, static_folder='static', static_url_path='')
+app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-@app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    return response
+MAX_DOWNLOAD_URLS = 2000  # Safety cap to prevent memory exhaustion
 
-# Directory for temporary downloads
-TEMP_DIR = "temp_downloads"
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 
-# ---------------------------------------------------------------------------
-# Fast Image Counter — httpx (no browser) + optional Playwright fallback
-# ---------------------------------------------------------------------------
-SKIP_EXTENSIONS = {'.svg', '.ico', '.gif'}
-SKIP_KEYWORDS = ['favicon', 'logo', 'icon', 'spinner', 'tracker', 'pixel',
-                  'doubleclick', 'analytics', 'metrika', 'badge', 'spacer']
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
-def _is_countable_url(url: str) -> bool:
-    """Return True if url looks like a real image (not a UI chrome asset)."""
-    if not url or url.startswith('data:'):
-        return False
-    path = urlparse(url).path.lower()
-    if any(path.endswith(ext) for ext in SKIP_EXTENSIONS):
-        return False
-    url_lower = url.lower()
-    if any(kw in url_lower for kw in SKIP_KEYWORDS):
-        return False
-    return True
 
-async def fast_count_images(url: str) -> dict:
-    """
-    Phase 1 — httpx (no browser, fast ~1-3 s):
-      Fetches raw HTML and counts every img src / srcset / data-* src / og:image.
-    Phase 2 — Playwright fallback (only if page appears JS-rendered):
-      Launches browser with NO scrolling, grabs DOM after initial load.
-    Returns a dict with counts broken down by source type.
-    """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                      'AppleWebKit/537.36 (KHTML, like Gecko) '
-                      'Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-
-    static_html = ''
-    fetch_ok     = False
-    fetch_method = 'httpx'
-
-    # ── Phase 1: fast static fetch ──────────────────────────────────────────
+def fetch_page(url: str, timeout=12) -> str:
+    """Fetch a Yandex Images page. Returns raw HTML or empty string."""
     try:
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True,
-                                     timeout=12) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            static_html = resp.text
-            fetch_ok = True
+        r = SESSION.get(url, timeout=timeout, allow_redirects=True)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        print(f"[count] httpx fetch failed: {e}")
-
-    # ── Detect JS-rendered pages (very few imgs in raw HTML) ────────────────
-    needs_browser = False
-    if fetch_ok:
-        quick_soup = BeautifulSoup(static_html, 'lxml')
-        raw_img_count = len(quick_soup.find_all('img'))
-        # Heuristic: if <5 imgs and page has heavy JS markers → needs browser
-        js_markers = ['__NEXT_DATA__', 'window.__INITIAL_STATE__',
-                      'window.YM', '__reactFiber', 'ng-version', 'data-react']
-        has_js_markers = any(m in static_html for m in js_markers)
-        needs_browser = raw_img_count < 5 and has_js_markers
-    else:
-        needs_browser = True   # fetch failed entirely → try browser
-
-    # ── Phase 2: Playwright (no scroll, just initial DOM) ───────────────────
-    js_html = ''
-    if needs_browser:
-        fetch_method = 'playwright'
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-                )
-                ctx = await browser.new_context(
-                    user_agent=headers['User-Agent'])
-                page = await ctx.new_page()
-                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(2)   # let initial JS settle
-                js_html = await page.content()
-                await browser.close()
-        except Exception as e:
-            print(f"[count] Playwright fallback failed: {e}")
-
-    html_to_parse = js_html if js_html else static_html
-    if not html_to_parse:
-        return {'total': 0, 'breakdown': {}, 'method': fetch_method,
-                'note': 'Could not fetch page'}
-
-    soup = BeautifulSoup(html_to_parse, 'lxml')
-    base = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
-
-    seen   = set()
-    counts = {'img_src': 0, 'srcset': 0, 'data_src': 0,
-              'og_image': 0, 'link_href': 0, 'css_bg': 0}
-
-    def add(src: str, bucket: str):
-        if not src:
-            return
-        src = src.strip().split()[0]   # handle srcset descriptors
-        if src.startswith('//'):
-            src = 'https:' + src
-        elif src.startswith('/'):
-            src = base + src
-        if src in seen:
-            return
-        if _is_countable_url(src):
-            seen.add(src)
-            counts[bucket] += 1
-
-    # img[src]
-    for tag in soup.find_all('img', src=True):
-        add(tag['src'], 'img_src')
-
-    # img[srcset]  /  source[srcset]
-    for tag in soup.find_all(['img', 'source'], srcset=True):
-        for part in tag['srcset'].split(','):
-            candidate = part.strip().split()[0]
-            add(candidate, 'srcset')
-
-    # data-src / data-original / data-lazy-src (lazy-load patterns)
-    for attr in ('data-src', 'data-original', 'data-lazy-src',
-                 'data-lazy', 'data-echo', 'data-url'):
-        for tag in soup.find_all(attrs={attr: True}):
-            add(tag[attr], 'data_src')
-
-    # og:image / twitter:image meta tags
-    for tag in soup.find_all('meta'):
-        prop = tag.get('property', '') + tag.get('name', '')
-        if 'image' in prop.lower():
-            add(tag.get('content', ''), 'og_image')
-
-    # <a href="..."> wrapping images (Yandex / Pinterest style)
-    for tag in soup.find_all('a', href=True):
-        href = tag['href']
-        # only count if the link itself looks like an image file
-        ext = urlparse(href).path.lower().split('.')[-1]
-        if ext in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'avif'):
-            add(href, 'link_href')
-        # also extract img_url query param (Yandex)
-        qs = parse_qs(urlparse(href).query)
-        img_url_val = (qs.get('img_url') or [])
-        if img_url_val:
-            add(unquote(img_url_val[0]), 'link_href')
-
-    # Inline CSS background-image: url(...)
-    bg_pattern = re.compile(r'url\([\'"]?(https?://[^)\'"]+)[\'"]?\)', re.I)
-    for tag in soup.find_all(style=True):
-        for m in bg_pattern.finditer(tag['style']):
-            add(m.group(1), 'css_bg')
-    # Also scan <style> blocks
-    for style_tag in soup.find_all('style'):
-        for m in bg_pattern.finditer(style_tag.get_text()):
-            add(m.group(1), 'css_bg')
-
-    total = len(seen)
-    return {
-        'total':     total,
-        'breakdown': {k: v for k, v in counts.items() if v > 0},
-        'method':    fetch_method,
-        'note':      'Browser render used' if needs_browser else 'Static HTML scan',
-    }
-
-@app.route('/api/count', methods=['POST'])
-def api_count():
-    """Fast image count endpoint — returns total + breakdown in ~2-5 s."""
-    data = request.json or {}
-    url  = data.get('url', '').strip()
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    try:
-        result = run_async(fast_count_images(url))
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-async def auto_scroll(page, accumulation_set, max_scrolls=120, max_seconds=60):
-    start_time = asyncio.get_event_loop().time()
-    
-    for i in range(max_scrolls):
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed > max_seconds:
-            print(f"[auto_scroll] Time limit reached ({elapsed:.1f}s), finishing scroll with {len(accumulation_set)} items accumulated.")
-            break
-
-        current_data = await page.evaluate("""
-            () => {
-                const results = [];
-                // 1. Search for Yandex / image search result links with img_url parameters
-                const links = document.querySelectorAll('a[href*="img_url="], a[href*="url="], a.ImagesContentImage-Cover, a.serp-item__link, a.serp-item__item');
-                links.forEach(a => {
-                    let highRes = null;
-                    try {
-                        const urlParams = new URL(a.href, window.location.origin).searchParams;
-                        highRes = urlParams.get('img_url') || urlParams.get('url');
-                    } catch(e) {}
-                    const img = a.querySelector('img');
-                    if (img || highRes) {
-                        results.push({ 
-                            url: highRes || img?.src, 
-                            alt: img?.alt || "", 
-                            isHighRes: !!highRes 
-                        });
-                    }
-                });
-
-                // 2. Search for all standard and lazy-loaded image elements
-                const allImgs = document.querySelectorAll('img');
-                allImgs.forEach(img => {
-                    const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src') || img.getAttribute('data-large-img');
-                    if (src) {
-                        results.push({ url: src, alt: img.alt || "", isHighRes: false });
-                    }
-                    
-                    const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
-                    if (srcset) {
-                        const parts = srcset.split(',');
-                        parts.forEach(p => {
-                            const candidate = p.trim().split(' ')[0];
-                            if (candidate) results.push({ url: candidate, alt: img.alt || "", isHighRes: false });
-                        });
-                    }
-                });
-
-                // 3. Fast instant JS click for "Show More" / "Fetch List" / pagination buttons
-                const selectors = [
-                    'button.FetchListButton-Button', '.FetchListButton-Button',
-                    '.more-button', '.serp-list__more', 'a.more', '.Button2_type_submit',
-                    '.serp-list__button', 'button[class*="more"]', 'button[class*="More"]',
-                    'a[class*="more"]', 'a[class*="More"]', '[data-test-id*="more"]'
-                ];
-                for (const sel of selectors) {
-                    const btns = document.querySelectorAll(sel);
-                    btns.forEach(b => {
-                        if (b && b.offsetHeight > 0) {
-                            try { b.click(); } catch(e) {}
-                        }
-                    });
-                }
-
-                return results;
-            }
-        """)
-        
-        for item in current_data:
-            url = item['url']
-            if url and not url.startswith('data:') and not 'spacer.gif' in url:
-                norm_url = normalize_url(url)
-                accumulation_set.add((norm_url, item['alt'], item['isHighRes']))
-
-        # Scroll to force infinite loading triggers
-        await page.evaluate("""
-            () => {
-                const scrollHeight = document.body.scrollHeight;
-                window.scrollBy(0, Math.max(window.innerHeight * 8.0, 1500));
-            }
-        """)
-        await asyncio.sleep(0.25)
-
-def fast_static_fetch(target_url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    }
-    try:
-        with httpx.Client(follow_redirects=True, timeout=12.0) as client:
-            res = client.get(target_url, headers=headers)
-            return res.text
-    except Exception as e:
-        print(f"[fast_static_fetch] Warning: static fetch failed: {e}")
+        print(f"[fetch] Failed {url[:80]}: {e}")
         return ""
 
-async def scrape_images(url, autoscroll=True):
-    # 1. Always attempt fast static fetch first (instant & low memory)
-    content = fast_static_fetch(url)
-    
-    # 2. Attempt Playwright DOM extraction if available
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
-            accumulated_data = set()
-            
+
+ORIGURL_RE = re.compile(r'"origUrl"\s*:\s*"(https?[^"]+)"')
+CDN_RE     = re.compile(r'https://avatars\.mds\.yandex\.net/[^\s"\'<>\\,\)]+')
+
+
+def extract_orig_urls(html: str) -> list:
+    """Extract original image URLs from Yandex HTML (entity-decoded)."""
+    if not html:
+        return []
+
+    decoded = unescape(html)
+    seen = set()
+    results = []
+
+    # Primary: origUrl fields
+    for m in ORIGURL_RE.finditer(decoded):
+        url = m.group(1).replace("\\/", "/")
+        if url not in seen and url.startswith("http"):
+            seen.add(url)
+            results.append(url)
+
+    # Fallback: Yandex CDN thumbnails → upgrade to /orig
+    if len(results) < 5:
+        for m in CDN_RE.finditer(decoded):
+            raw = m.group(0).split("?")[0]
+            parts = raw.split("/")
+            if len(parts) >= 5:
+                if parts[-1] not in ("orig", "original"):
+                    parts[-1] = "orig"
+                upgraded = "/".join(parts)
+                if upgraded not in seen:
+                    seen.add(upgraded)
+                    results.append(upgraded)
+
+    return results
+
+
+def build_yandex_url(domain: str, text: str, page: int, extra: dict) -> str:
+    params = {"text": text, "p": page}
+    params.update(extra)
+    return f"https://{domain}/images/search?{urlencode(params)}"
+
+
+def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
+    """Scrape up to max_pages in parallel. Returns list of image URLs."""
+    all_urls = []
+    seen = set()
+
+    def fetch_page_urls(page: int):
+        url = build_yandex_url(domain, text, page, extra)
+        html = fetch_page(url)
+        return extract_orig_urls(html)
+
+    # Page 0 first (fail-fast check)
+    page0 = fetch_page_urls(0)
+    if not page0:
+        return []
+    for u in page0:
+        if u not in seen:
+            seen.add(u)
+            all_urls.append(u)
+
+    if max_pages <= 1:
+        return all_urls
+
+    # Pages 1..max_pages in parallel (8 workers)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(fetch_page_urls, p): p for p in range(1, max_pages)}
+        for future in concurrent.futures.as_completed(futures):
             try:
-                print(f"Scraping URL with Playwright: {url}")
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(1.5)
-                
-                if autoscroll:
-                    await auto_scroll(page, accumulated_data, max_scrolls=120, max_seconds=60)
-                else:
-                    await page.evaluate("window.scrollTo(0, 1200)") 
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"Playwright navigation warning: {e}")
-            
-            pw_content = await page.content()
-            if pw_content:
-                content = pw_content + "\n" + content
-            await browser.close()
-    except Exception as e:
-        print(f"Playwright launch warning (falling back to static extraction): {e}")
-        
-    soup = BeautifulSoup(content, 'html.parser')
-    images = []
-    seen_urls = set()
+                urls = future.result()
+                for u in urls:
+                    if u not in seen:
+                        seen.add(u)
+                        all_urls.append(u)
+            except Exception:
+                pass
 
-    # Helper to add image if unique and high quality
-    def add_img(url, alt, w=0, h=0, thumb=None):
-        if not url or url.startswith('data:'): return
-        
-        # Upgrade http:// to https:// to prevent Mixed Content browser blocking
-        if url.startswith('http://'):
-            url = 'https://' + url[7:]
-        if thumb and thumb.startswith('http://'):
-            thumb = 'https://' + thumb[7:]
-            
-        # Skip SVGs, web icons, tracking pixels, or standard small logos
-        if url.split('?')[0].endswith('.svg') or any(k in url.lower() for k in ['favicon', '/tracker', 'pixel.gif', 'doubleclick', 'google-analytics', 'yandex.ru/metrika', 'logo', 'spinner', 'icon']):
-            return
-            
-        url = normalize_url(url)
-        
-        try:
-            w_val = int(w) if w and w != 'Original' else 0
-            h_val = int(h) if h and h != 'Original' else 0
-        except:
-            w_val, h_val = 0, 0
+    return all_urls
 
-        if url in seen_urls: return
-        seen_urls.add(url)
-        
-        images.append({
-            'url': url, 
-            'thumb': thumb or url,
-            'alt': alt, 
-            'width': w_val or 'Original', 
-            'height': h_val or 'Original',
-            'area': w_val * h_val
-        })
 
-    # --- Yandex Metadata Extraction (Highest Resolution) ---
-    import html
-    import json
-    
-    # Dictionary to store best version of each image ID: {id: {url, w, h, alt}}
-    best_images = {}
+def parse_yandex_request(data: dict):
+    """Parse and validate a Yandex scrape request. Returns (domain, text, extra) or raises."""
+    url  = data.get("url", "").strip()
+    if not url:
+        raise ValueError("URL is required")
+    u = urlparse(url)
+    if "yandex" not in u.netloc:
+        raise ValueError("Only Yandex Images URLs are supported")
+    params = parse_qs(u.query)
+    text   = (params.get("text") or params.get("query") or [""])[0].strip()
+    if not text:
+        raise ValueError("No search text found in URL. Example: https://yandex.com/images/search?text=cats")
+    extra  = {k: v[0] for k, v in params.items() if k not in ("text", "p", "format")}
+    domain = u.netloc
+    return domain, text, extra
 
-    # 1. Search for JSON-like objects in the content (often entity encoded)
-    for is_encoded in [True, False]:
-        q = '&quot;' if is_encoded else '"'
-        pattern = rf'{q}id{q}\s*:\s*{q}([a-f0-9]{{32}}){q}.*?({q}origUrl{q}|{q}dups{q})'
-        matches = re.finditer(pattern, content)
-        
-        for match in matches:
-            img_id = match.group(1)
-            start_pos = match.start()
-            chunk = content[start_pos:start_pos+5000]
-            
-            if is_encoded:
-                chunk = html.unescape(chunk)
-            
-            try:
-                orig_match = re.search(r'"origUrl":"(.*?)"', chunk)
-                dups_match = re.search(r'"dups":\[(.*?)]', chunk)
-                thumb_match = re.search(r'"thumbUrl":"(.*?)"', chunk) or re.search(r'"url":"(.*?avatars\.mds\.yandex\.net.*?)"', chunk)
-                w_match = re.search(r'"width":(\d+)', chunk)
-                h_match = re.search(r'"height":(\d+)', chunk)
-                
-                current_best_url = None
-                current_thumb = thumb_match.group(1).replace('\\/', '/') if thumb_match else None
-                current_w = int(w_match.group(1)) if w_match else 0
-                current_h = int(h_match.group(1)) if h_match else 0
-                
-                if orig_match:
-                    current_best_url = orig_match.group(1).replace('\\/', '/')
-                elif dups_match:
-                    try:
-                        dups_json = json.loads("[" + dups_match.group(1) + "]")
-                        if dups_json:
-                            best_dup = max(dups_json, key=lambda x: x.get('w', 0) * x.get('h', 0))
-                            current_best_url = best_dup.get('url')
-                            current_w = max(current_w, best_dup.get('w', 0))
-                            current_h = max(current_h, best_dup.get('h', 0))
-                    except: pass
-                
-                if current_best_url:
-                    current_best_url = normalize_url(current_best_url)
-                    
-                    if img_id not in best_images:
-                        best_images[img_id] = {'url': current_best_url, 'thumb': current_thumb, 'w': current_w, 'h': current_h}
-                    else:
-                        old = best_images[img_id]
-                        if (current_w * current_h) > (old['w'] * old['h']):
-                            best_images[img_id] = {'url': current_best_url, 'thumb': current_thumb, 'w': current_w, 'h': current_h}
-            except: continue
 
-    # Add the best versions found from metadata
-    for img_id, data in best_images.items():
-        add_img(data['url'], 'Highest Quality Asset', data['w'], data['h'], thumb=data.get('thumb'))
-    
-    print(f"Extracted {len(best_images)} unique high-res images from metadata.")
-
-    # 0. Check the target URL itself for a source image (CBIR)
-    try:
-        parsed_target = urlparse(url)
-        target_qs = parse_qs(parsed_target.query)
-        img_url_vals = target_qs.get('img_url') or target_qs.get('url') or []
-        source_search_url = img_url_vals[0] if img_url_vals else None
-        if source_search_url:
-            add_img(unquote(source_search_url), 'Search Source (Original)')
-    except: pass
-
-    # 0.1 Specifically look for CBIR/Source image in DOM
-    try:
-        source_link = soup.find('a', class_='CbirItem-Link') or soup.find('a', class_='CbirHeader-Image')
-        if source_link:
-            href = source_link.get('href')
-            if href and 'img_url=' in href:
-                src = parse_qs(urlparse(href).query).get('img_url', [None])[0]
-                if src: add_img(unquote(src), 'Source Image (High Res)')
-            else:
-                img = source_link.find('img')
-                if img: add_img(img.get('src'), 'Source Image')
-    except: pass
-
-    # 1. Process accumulated images (captured during scroll)
-    for data in list(accumulated_data):
-        img_u, alt = data[0], data[1]
-        add_img(img_u, alt)
-
-    # 2. Extract from final DOM (BS4) - especially links
-    for link in soup.find_all('a', class_=['ImagesContentImage-Cover', 'serp-item__link', 'serp-item__item']):
-        try:
-            href = link.get('href')
-            if href and 'img_url=' in href:
-                img_url = parse_qs(urlparse(href).query).get('img_url', [None])[0]
-                if img_url:
-                    add_img(unquote(img_url), 'High Res Asset')
-        except: pass
-
-    # 3. Fallback: all images
-    for img in soup.find_all('img'):
-        src = img.get('src') or img.get('data-src') or img.get('data-original')
-        if not src: continue
-        
-        if 'icon' in src.lower() or 'logo' in src.lower() or 'spinner' in src.lower(): continue
-            
-        add_img(src, img.get('alt', ''))
-    
-    print(f"Total unique images found: {len(images)}")
-    return images
-
-@app.route('/')
-def index():
-    return send_from_directory('static', 'index.html')
-
-@app.route('/health', methods=['GET', 'HEAD'])
-@app.route('/api/health', methods=['GET', 'HEAD'])
+@app.route("/api/health")
 def health():
-    """Lightweight keep-alive / wake-up probe. Returns immediately."""
-    return jsonify({'status': 'ok', 'service': 'image-scraper-pro'})
+    return jsonify({"status": "ok"})
 
-@app.route('/api/scrape', methods=['POST'])
+
+@app.route("/api/count", methods=["POST", "OPTIONS"])
+def api_count():
+    """Fast count — scrapes only page 0 and returns image count + breakdown."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    data = request.json or {}
+    try:
+        domain, text, extra = parse_yandex_request(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        urls = scrape_yandex(domain, text, extra, max_pages=1)
+        breakdown = {}
+        for u in urls:
+            ext = u.split(".")[-1].split("?")[0].lower()[:4]
+            key = ext if ext in ("jpg", "jpeg", "png", "webp", "avif") else "other"
+            breakdown[key] = breakdown.get(key, 0) + 1
+        print(f"[count] {len(urls)} images for '{text}'")
+        return jsonify({"count": len(urls), "breakdown": breakdown})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scrape", methods=["POST", "OPTIONS"])
 def api_scrape():
-    data = request.json
-    url = data.get('url')
-    autoscroll = data.get('autoscroll', True)
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
-    try:
-        images = run_async(scrape_images(url, autoscroll=autoscroll))
-        return jsonify({'images': images})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
 
-@app.route('/api/proxy_download', methods=['GET'])
-def api_proxy_download():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
-    try:
-        if url.startswith('http://'):
-            url = 'https://' + url[7:]
-            
-        ascii_url = requote_uri(url)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-        }
-        response = requests.get(ascii_url, headers=headers, timeout=12, stream=True)
-        response.raise_for_status()
-        
-        content_type = response.headers.get('Content-Type', 'image/jpeg')
-        return send_file(
-            io.BytesIO(response.content),
-            mimetype=content_type,
-            as_attachment=False
-        )
-    except Exception as e:
-        print(f"Proxy download failed for {url}: {e}")
-        return jsonify({'error': str(e)}), 404
+    data = request.json or {}
+    deep = data.get("autoscroll", True)
 
-@app.route('/api/download', methods=['POST'])
+    try:
+        domain, text, extra = parse_yandex_request(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    max_pages = 34 if deep else 1
+    try:
+        urls = scrape_yandex(domain, text, extra, max_pages=max_pages)
+        images = [{"url": u, "thumb": u, "alt": "", "width": "Original", "height": "Original"} for u in urls]
+        print(f"[scrape] Found {len(images)} images for '{text}'")
+        return jsonify({"images": images})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/download", methods=["POST", "OPTIONS"])
 def api_download():
-    data = request.json
-    urls = data.get('urls', [])
-    if not urls:
-        return jsonify({'error': 'No URLs provided'}), 400
-    
-    import concurrent.futures
-    
-    def download_image(url_index_tuple):
-        index, url = url_index_tuple
-        try:
-            # URL encode to avoid unicode header issues
-            ascii_url = requote_uri(url)
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Referer': ascii_url
-            }
-            response = requests.get(ascii_url, headers=headers, timeout=12)
-            if response.status_code == 200:
-                ext = url.split('.')[-1].split('?')[0].lower()
-                if not ext or len(ext) > 4 or not ext.isalnum():
-                    ext = 'jpg'
-                return index, response.content, ext
-        except Exception as e:
-            print(f"Parallel fetch failed for {url}: {e}")
-        return index, None, None
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
 
-    indexed_urls = list(enumerate(urls))
-    downloaded_data = {}
-    
-    # Run requests concurrently using up to 12 workers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        results = executor.map(download_image, indexed_urls)
-        for index, content, ext in results:
-            if content:
-                downloaded_data[index] = (content, ext)
+    data = request.json or {}
+    urls = data.get("urls", [])
+    if not urls:
+        return jsonify({"error": "No URLs provided"}), 400
+
+    # Safety cap — prevent memory exhaustion from huge lists
+    if len(urls) > MAX_DOWNLOAD_URLS:
+        urls = urls[:MAX_DOWNLOAD_URLS]
+        print(f"[download] Capped at {MAX_DOWNLOAD_URLS} URLs")
+
+    dl_headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Referer": "https://yandex.com/",
+    }
+
+    def download_one(indexed):
+        idx, url = indexed
+        try:
+            r = SESSION.get(url, headers=dl_headers, timeout=15, stream=False)
+            if r.status_code == 200 and len(r.content) > 500:
+                ext = url.split(".")[-1].split("?")[0].lower()
+                if ext not in ("jpg", "jpeg", "png", "webp", "avif", "bmp", "gif"):
+                    ext = "jpg"
+                return idx, r.content, ext
+        except Exception:
+            pass
+        return idx, None, None
 
     memory_file = io.BytesIO()
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for index, url in indexed_urls:
-            if index in downloaded_data:
-                content, ext = downloaded_data[index]
-                filename = f"image_{index + 1}_{uuid.uuid4().hex[:6]}.{ext}"
-                zf.writestr(filename, content)
-                
+    ok = 0
+    print(f"[download] Starting ZIP of {len(urls)} images (12 workers)...")
+    with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            for idx, content, ext in pool.map(download_one, enumerate(urls)):
+                if content:
+                    zf.writestr(f"image_{idx+1:04d}.{ext}", content)
+                    ok += 1
+                    if ok % 50 == 0:
+                        print(f"[download] Packaged {ok}/{len(urls)}...")
+
     memory_file.seek(0)
+    print(f"[download] Zipped {ok}/{len(urls)} images")
     return send_file(
         memory_file,
-        mimetype='application/zip',
+        mimetype="application/zip",
         as_attachment=True,
-        download_name='downloaded_images.zip'
+        download_name="yandex_images.zip",
     )
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True, port=5000)
+
+@app.route("/api/proxy_download")
+def api_proxy_download():
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"error": "Missing url"}), 400
+    try:
+        r = SESSION.get(url, headers={"Referer": "https://yandex.com/"}, timeout=15)
+        r.raise_for_status()
+        ct = r.headers.get("Content-Type", "image/jpeg")
+
+        # Derive a clean filename from the URL
+        path_part = url.split("?")[0].rstrip("/").split("/")[-1] or "image"
+        if "." not in path_part[-5:]:
+            ext = ct.split("/")[-1].split(";")[0].strip() or "jpg"
+            path_part = f"{path_part}.{ext}"
+
+        response = send_file(io.BytesIO(r.content), mimetype=ct)
+        response.headers["Content-Disposition"] = f'attachment; filename="{path_part}"'
+        return response
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  Yandex Image Scraper Backend — starting on port 5000")
+    print("  Open: http://localhost:5000")
+    print("=" * 60)
+    app.run(host="0.0.0.0", port=5000, debug=False)
