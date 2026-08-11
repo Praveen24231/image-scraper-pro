@@ -544,58 +544,125 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================================================
-    // ZIP DOWNLOAD — send URLs to backend, get back a zip file
+    // ZIP DOWNLOAD — local backend OR client-side JSZip fallback
     // ==========================================================================
     downloadZipBtn.addEventListener('click', async () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
-        if (!localAvailable) {
-            showToast('Local backend not running. Run: cd backend && python app.py', 'error');
+
+        // Mode 1: Local Backend Fast Parallel ZIP
+        if (localAvailable) {
+            showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
+            log(`Downloading ${targets.length} images via local backend (12 parallel workers)…`, 'success');
+            progressBarFill.classList.add('indeterminate');
+            updateStats(0, '—', 'Working…');
+
+            try {
+                downloadModalStatus.textContent = `Downloading ${targets.length} images…`;
+                const res = await fetch(`${LOCAL_API}/api/download`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ urls: targets.map(i => i.url) }),
+                    signal: AbortSignal.timeout(300000)
+                });
+                if (!res.ok) throw new Error(`Backend error: ${res.status}`);
+
+                progressBarFill.classList.remove('indeterminate');
+                downloadModalStatus.textContent = 'Packaging ZIP…';
+                updateStats(80, '—', 'Packaging…');
+
+                const blob = await res.blob();
+                updateStats(100, '—', 'Done');
+
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
+                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+
+                const sizeMB = (blob.size / 1048576).toFixed(2);
+                log(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
+                downloadModalStatus.textContent = 'ZIP downloaded!';
+                doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
+            } catch(e) {
+                progressBarFill.classList.remove('indeterminate');
+                log('ZIP failed: ' + e.message, 'fail');
+                downloadModalStatus.textContent = 'Error: ' + e.message;
+                showToast('ZIP download failed: ' + e.message, 'error');
+                doneModal(null);
+            }
             return;
         }
 
-        showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
-        log(`Downloading ${targets.length} images via backend (12 parallel workers)…`, 'success');
+        // Mode 2: Client-side JSZip Fallback
+        if (typeof JSZip !== 'undefined') {
+            showModal(`Building ZIP — ${targets.length} images`, 'Fetching assets in browser…');
+            log(`Starting client-side ZIP packaging for ${targets.length} images…`, 'info');
 
-        // Show indeterminate progress while backend is working
-        progressBarFill.classList.add('indeterminate');
-        updateStats(0, '—', 'Working…');
+            const zip = new JSZip();
+            let done = 0, ok = 0, bytes = 0, idx = 0;
+            const t0 = Date.now();
 
-        try {
-            downloadModalStatus.textContent = `Downloading ${targets.length} images…`;
+            async function worker() {
+                while (idx < targets.length && !downloadAborted) {
+                    const i = idx++, img = targets[i];
+                    try {
+                        const blob = await fetchImageBlob(img.url);
+                        if (!blob) throw new Error('Fetch failed');
+                        bytes += blob.size;
+                        let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
+                        if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
+                        zip.file(`image_${String(i + 1).padStart(4, '0')}.${ext}`, blob);
+                        ok++;
+                        log(`✔ Packaged img_${i+1} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
+                    } catch(e) {
+                        log(`✖ img_${i+1}: ${e.message}`, 'fail');
+                    }
+                    done++;
+                    const el = (Date.now() - t0) / 1000;
+                    const sp = bytes / Math.max(el, 0.1);
+                    const spTxt = sp < 1048576 ? `${(sp / 1024).toFixed(1)} KB/s` : `${(sp / 1048576).toFixed(1)} MB/s`;
+                    const rem = done > 0 ? (el / done) * (targets.length - done) : 0;
+                    updateStats((done / targets.length) * 80, spTxt, rem < 60 ? `${Math.ceil(rem)}s` : `${Math.floor(rem / 60)}m ${Math.ceil(rem % 60)}s`);
+                    downloadModalStatus.textContent = `${done} / ${targets.length} fetched…`;
+                }
+            }
 
-            const res = await fetch(`${LOCAL_API}/api/download`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls: targets.map(i => i.url) }),
-                signal: AbortSignal.timeout(300000)
-            });
-            if (!res.ok) throw new Error(`Backend error: ${res.status}`);
+            await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
 
-            progressBarFill.classList.remove('indeterminate');
-            downloadModalStatus.textContent = 'Packaging ZIP…';
-            updateStats(80, '—', 'Packaging…');
+            if (downloadAborted || ok === 0) {
+                log('ZIP generation cancelled or no images fetched.', 'fail');
+                doneModal(null);
+                return;
+            }
 
-            const blob = await res.blob();
-            progressBarFill.classList.remove('indeterminate');
-            updateStats(100, '—', 'Done');
+            downloadModalStatus.textContent = 'Compressing archive…';
+            log('Compressing ZIP archive…', 'info');
+            progressBarFill.classList.add('indeterminate');
 
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
-            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+            try {
+                const content = await zip.generateAsync({ type: 'blob' });
+                progressBarFill.classList.remove('indeterminate');
+                updateStats(100, '—', 'Done');
 
-            const sizeMB = (blob.size / 1048576).toFixed(2);
-            log(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
-            downloadModalStatus.textContent = 'ZIP downloaded!';
-            doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
-        } catch(e) {
-            progressBarFill.classList.remove('indeterminate');
-            log('ZIP failed: ' + e.message, 'fail');
-            downloadModalStatus.textContent = 'Error: ' + e.message;
-            showToast('ZIP download failed: ' + e.message, 'error');
-            doneModal(null);
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(content);
+                a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
+                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+
+                const sizeMB = (content.size / 1048576).toFixed(2);
+                log(`✅ ZIP generated: ${sizeMB} MB`, 'success');
+                downloadModalStatus.textContent = 'ZIP downloaded!';
+                doneModal(`ZIP saved — ${sizeMB} MB (${ok} images)`);
+            } catch(err) {
+                progressBarFill.classList.remove('indeterminate');
+                log('Compression failed: ' + err.message, 'fail');
+                showToast('ZIP compression failed', 'error');
+                doneModal(null);
+            }
+            return;
         }
+
+        showToast('JSZip library is loading. Please try again in a moment or start the local backend.', 'error');
     });
 
     // ==========================================================================
