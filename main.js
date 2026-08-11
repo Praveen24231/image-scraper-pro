@@ -180,6 +180,52 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================================================
     // SCRAPE — calls local Python backend (real IP, no captcha)
     // ==========================================================================
+    // ==========================================================================
+    // SCRAPE VIA VERCEL PROXY — parses Yandex HTML without local backend
+    // ==========================================================================
+    async function scrapeViaProxy(url) {
+        const images = [];
+        const seen = new Set();
+
+        // Fetch one page of Yandex Images HTML via the serverless proxy
+        async function fetchPage(pageUrl) {
+            try {
+                const r = await fetch(`/api/proxy?url=${encodeURIComponent(pageUrl)}`, {
+                    signal: AbortSignal.timeout(20000)
+                });
+                if (!r.ok) return null;
+                const data = await r.json();
+                return data.contents || null;
+            } catch { return null; }
+        }
+
+        function extractImages(html) {
+            // Extract high-res URLs from Yandex Images JSON blobs in page HTML
+            const results = [];
+            // Pattern 1: "url":"https://..." in data-bem or JSON
+            const urlRe = /"url"\s*:\s*"(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp|gif|avif)[^"]*)"/gi;
+            let m;
+            while ((m = urlRe.exec(html)) !== null) {
+                const u = m[1].replace(/\\\/g, '/');
+                if (!seen.has(u) && !u.includes('yastatic') && !u.includes('favicon')) {
+                    seen.add(u); results.push({ url: u, thumb: u, alt: 'Image' });
+                }
+            }
+            // Pattern 2: "orig":{"url":"..."
+            const origRe = /"orig"\s*:\s*\{[^}]*"url"\s*:\s*"(https?:\/\/[^"]+)"/gi;
+            while ((m = origRe.exec(html)) !== null) {
+                const u = m[1].replace(/\\/g, '');
+                if (!seen.has(u)) { seen.add(u); results.push({ url: u, thumb: u, alt: 'Image' }); }
+            }
+            return results;
+        }
+
+        // Always fetch page 0
+        const html0 = await fetchPage(url);
+        if (html0) images.push(...extractImages(html0));
+        return images;
+    }
+
     scrapeBtn.addEventListener('click', async () => {
         const url = urlInput.value.trim();
         if (!url) {
@@ -190,25 +236,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         await checkLocalBackend();
 
-        if (!localAvailable) {
-            resultsSection.classList.remove('hidden');
-            loader.classList.add('hidden');
-            imageGrid.innerHTML = renderEmptyState({
-                icon: 'server-off',
-                title: '⚠️ Local Backend Not Running',
-                body: `Yandex blocks cloud/proxy requests. Run the scraper <strong>locally</strong> so it uses your real IP.<br><br>
-                       <strong>1. Open a terminal in the project folder:</strong><br>
-                       <code>cd backend</code><br><br>
-                       <strong>2. Install &amp; run:</strong><br>
-                       <code>pip install flask flask-cors requests</code><br>
-                       <code>python app.py</code>`,
-                note: 'Then click Extract Images again.'
-            });
-            imageCount.textContent = '0 images';
-            lucide.createIcons();
-            return;
-        }
-
         resultsSection.classList.add('hidden');
         loader.classList.remove('hidden');
         imageGrid.innerHTML = '';
@@ -218,32 +245,32 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        loaderMsg.textContent = deepMode
-            ? '⚡ Deep scraping Yandex Images (up to 1000+ images)…'
-            : '⚡ Scraping Yandex Images…';
 
-        try {
-            const res = await fetch(`${LOCAL_API}/api/scrape`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, autoscroll: deepMode }),
-                signal: AbortSignal.timeout(300000) // 5 min max
-            });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            allImages = data.images || [];
-        } catch (err) {
-            loader.classList.add('hidden');
-            resultsSection.classList.remove('hidden');
-            imageGrid.innerHTML = renderEmptyState({
-                icon: 'alert-triangle',
-                title: 'Scrape Failed',
-                body: err.message
-            });
-            imageCount.textContent = '0 images';
-            showToast('Scrape failed: ' + err.message, 'error');
-            lucide.createIcons();
-            return;
+        if (localAvailable) {
+            // ── Mode A: Local Python backend (fastest, 1000+ images, your real IP)
+            loaderMsg.textContent = deepMode
+                ? '⚡ Deep scraping via local backend (up to 1000+ images)…'
+                : '⚡ Scraping via local backend…';
+            try {
+                const res = await fetch(`${LOCAL_API}/api/scrape`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, autoscroll: deepMode }),
+                    signal: AbortSignal.timeout(300000)
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+                allImages = data.images || [];
+            } catch (err) {
+                // Local backend failed — fall through to Vercel proxy mode
+                showToast('Local backend error — trying Vercel proxy…', 'info');
+                loaderMsg.textContent = '🌐 Scraping via cloud proxy (page 1 only)…';
+                allImages = await scrapeViaProxy(url);
+            }
+        } else {
+            // ── Mode B: Vercel serverless proxy (cloud mode, page 1 only)
+            loaderMsg.textContent = '🌐 Scraping via cloud proxy (no local backend detected)…';
+            allImages = await scrapeViaProxy(url);
         }
 
         loader.classList.add('hidden');
@@ -253,11 +280,13 @@ document.addEventListener('DOMContentLoaded', () => {
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'search-x',
                 title: 'No Images Found',
-                body: `Make sure your URL contains a search query:<br>
-                       <code>https://yandex.com/images/search?text=cats</code>`
+                body: `Try a direct Yandex Images search URL:<br>
+                       <code>https://yandex.com/images/search?text=cats</code><br><br>
+                       For 1000+ images, run the local backend:<br>
+                       <code>cd backend &amp;&amp; python app.py</code>`
             });
             imageCount.textContent = '0 images';
-            showToast('No images found for this URL', 'info');
+            showToast('No images found', 'info');
         } else {
             filterSelect.value = 'all';
             applyFilter();
