@@ -555,7 +555,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // Mode 1: Local Backend Fast Parallel ZIP
+        // Mode 1: Try Local Backend Fast Parallel ZIP (if connected)
         if (localAvailable) {
             showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
             log(`Downloading ${targets.length} images via local backend (12 parallel workers)…`, 'success');
@@ -588,17 +588,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 log(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
                 downloadModalStatus.textContent = 'ZIP downloaded!';
                 doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
+                return;
             } catch(e) {
                 progressBarFill.classList.remove('indeterminate');
-                log('ZIP failed: ' + e.message, 'fail');
-                downloadModalStatus.textContent = 'Error: ' + e.message;
-                showToast('ZIP download failed: ' + e.message, 'error');
-                doneModal(null);
+                log(`⚠️ Local backend unreachable (${e.message}). Switching to in-browser ZIP engine…`, 'fail');
+                // Fall through to Mode 2 (Client-Side JSZip)!
             }
-            return;
         }
 
-        // Mode 2: Client-side JSZip Fallback
+        // Mode 2: Client-side JSZip Fallback (Over HTTPS via /api/proxy)
         if (typeof JSZip !== 'undefined') {
             showModal(`Building ZIP — ${targets.length} images`, 'Fetching assets in browser…');
             log(`Starting client-side ZIP packaging for ${targets.length} images…`, 'info');
@@ -667,7 +665,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        showToast('JSZip library is loading. Please try again in a moment or start the local backend.', 'error');
+        showToast('JSZip library is loading. Please try again in a moment.', 'error');
     });
 
     // ==========================================================================
