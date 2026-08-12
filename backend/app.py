@@ -114,8 +114,47 @@ def build_yandex_url(domain: str, text: str, page: int, extra: dict) -> str:
     return f"https://{domain}/images/search?{urlencode(params)}"
 
 
+def scrape_yandex_playwright(target_url: str) -> list:
+    """Fallback Headless Chromium Playwright scraper for captcha/bot-protected requests."""
+    from playwright.sync_api import sync_playwright
+    print(f"[playwright] Launching Chromium browser for: {target_url[:80]}...")
+    urls = []
+    seen = set()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080}
+            )
+            page = context.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(3000)
+
+            # Scroll down to load images dynamically
+            for _ in range(8):
+                page.evaluate("window.scrollBy(0, 1500)")
+                page.wait_for_timeout(500)
+
+            content = page.content()
+            urls = extract_orig_urls(content)
+            browser.close()
+            print(f"[playwright] Successfully extracted {len(urls)} images via Playwright")
+    except Exception as e:
+        print(f"[playwright] Error during rendering: {e}")
+    return urls
+
+
 def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
-    """Scrape up to max_pages in high-speed parallel workers (16 threads)."""
+    """Scrape up to max_pages in high-speed parallel workers (16 threads). Uses Playwright fallback if needed."""
     all_urls = []
     seen = set()
 
@@ -131,7 +170,16 @@ def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
             seen.add(u)
             all_urls.append(u)
 
-    if max_pages <= 1:
+    # If HTTP requests return 0 images (e.g. Yandex bot block), use Playwright Chromium fallback!
+    if not all_urls:
+        first_url = build_yandex_url(domain, text, 0, extra)
+        pw_urls = scrape_yandex_playwright(first_url)
+        for u in pw_urls:
+            if u not in seen:
+                seen.add(u)
+                all_urls.append(u)
+
+    if max_pages <= 1 or not all_urls:
         return all_urls
 
     # Pages 1..max_pages in parallel (16 high-speed workers)
