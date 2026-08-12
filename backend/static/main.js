@@ -212,32 +212,43 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        loaderMsg.textContent = '⚡ Connecting to cloud backend (waking up if sleeping)…';
+        loaderMsg.textContent = '⚡ Connecting to cloud server (waking up if sleeping)…';
 
         let targetApi = BACKEND_URL;
         let res = null;
 
-        // Try primary BACKEND_URL first (Render cloud)
+        // Attempt 1: Primary BACKEND_URL (Render cloud or local)
         try {
             res = await fetch(`${targetApi}/api/scrape`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, autoscroll: deepMode }),
-                signal: AbortSignal.timeout(60000) // 60s timeout for cold start + scrape
+                signal: AbortSignal.timeout(120000) // 120s timeout for cold start + 1000+ images
             });
         } catch (e1) {
-            // Fallback to LOCAL_API if Render was unreachable
-            if (targetApi !== LOCAL_API) {
-                loaderMsg.textContent = '⚡ Trying local backend fallback…';
+            console.warn('Fetch 1 failed, retrying Render cloud backend…', e1);
+            // Attempt 2: Auto-retry Render cloud after 3s delay (in case server was waking up)
+            loaderMsg.textContent = '⚡ Server waking up, retrying extraction…';
+            await new Promise(r => setTimeout(r, 3000));
+            try {
+                res = await fetch(`${RENDER_API}/api/scrape`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, autoscroll: deepMode }),
+                    signal: AbortSignal.timeout(120000)
+                });
+                if (res.ok) targetApi = RENDER_API;
+            } catch (e2) {
+                // Attempt 3: Try local backend fallback
                 try {
                     res = await fetch(`${LOCAL_API}/api/scrape`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url, autoscroll: deepMode }),
-                        signal: AbortSignal.timeout(60000)
+                        signal: AbortSignal.timeout(30000)
                     });
                     if (res.ok) targetApi = LOCAL_API;
-                } catch (e2) {}
+                } catch (e3) {}
             }
         }
 
