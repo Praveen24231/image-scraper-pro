@@ -212,58 +212,46 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        loaderMsg.textContent = '⚡ Extracting high-resolution images…';
+        loaderMsg.textContent = '⚡ Connecting to cloud server (extracting images)…';
 
-        let allExtracted = [];
+        let extracted = [];
+        const endpoints = [
+            `${RENDER_API}/api/scrape`,
+            `${LOCAL_API}/api/scrape`
+        ];
 
-        // Step 1: Instant 24/7 Vercel Serverless Scrape (0s sleep, works on every device)
-        try {
-            const vRes = await fetch('/api/scrape', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, autoscroll: deepMode }),
-                signal: AbortSignal.timeout(12000)
-            });
-            if (vRes.ok) {
-                const vData = await vRes.json();
-                if (vData.images && vData.images.length > 0) {
-                    allExtracted = vData.images;
-                }
+        // Retry loop: try up to 3 times to handle Render cold-start wakeups gracefully
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            if (attempt > 1) {
+                loaderMsg.textContent = `⚡ Cloud server waking up, retrying extraction (attempt ${attempt}/3)…`;
+                await new Promise(r => setTimeout(r, 4000));
             }
-        } catch (eVercel) {}
 
-        // Step 2: Render / Local Backend fallback for deep 1000+ image scraping
-        if (allExtracted.length < 5) {
-            let targetApi = BACKEND_URL;
-            let res = null;
-
-            try {
-                res = await fetch(`${targetApi}/api/scrape`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, autoscroll: deepMode }),
-                    signal: AbortSignal.timeout(60000)
-                });
-            } catch (e1) {
+            for (const endpoint of endpoints) {
                 try {
-                    res = await fetch(`${RENDER_API}/api/scrape`, {
+                    const res = await fetch(endpoint, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url, autoscroll: deepMode }),
-                        signal: AbortSignal.timeout(60000)
+                        signal: AbortSignal.timeout(45000)
                     });
-                } catch (e2) {}
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.images && data.images.length > 0) {
+                            extracted = data.images;
+                            BACKEND_URL = endpoint.replace('/api/scrape', '');
+                            localAvailable = true;
+                            updateStatusBadge();
+                            break;
+                        }
+                    }
+                } catch (e) {}
             }
 
-            if (res && res.ok) {
-                const rData = await res.json();
-                if (rData.images && rData.images.length > 0) {
-                    allExtracted = rData.images;
-                }
-            }
+            if (extracted.length > 0) break;
         }
 
-        allImages = allExtracted;
+        allImages = extracted;
 
         loader.classList.add('hidden');
         resultsSection.classList.remove('hidden');
@@ -272,31 +260,10 @@ document.addEventListener('DOMContentLoaded', () => {
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'search-x',
                 title: 'No Images Found',
-                body: `Make sure your URL contains a search query:<br>
-                       <code>https://yandex.com/images/search?text=cats</code>`
+                body: `The cloud server took too long to respond.<br><br>Please wait 5 seconds and click <strong>Extract Images</strong> again.`
             });
             imageCount.textContent = '0 images';
-            showToast('No images found for this URL', 'info');
-        } else {
-            filterSelect.value = 'all';
-            applyFilter();
-            showToast(`Found ${allImages.length} images!`, 'success');
-        }
-        lucide.createIcons();
-        return;
-
-        loader.classList.add('hidden');
-        resultsSection.classList.remove('hidden');
-
-        if (!allImages.length) {
-            imageGrid.innerHTML = renderEmptyState({
-                icon: 'search-x',
-                title: 'No Images Found',
-                body: `Make sure your URL contains a search query:<br>
-                       <code>https://yandex.com/images/search?text=cats</code>`
-            });
-            imageCount.textContent = '0 images';
-            showToast('No images found for this URL', 'info');
+            showToast('Cloud server waking up — please click Extract Images again', 'info');
         } else {
             filterSelect.value = 'all';
             applyFilter();
