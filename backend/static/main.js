@@ -203,25 +203,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        await checkLocalBackend();
-
-        if (!localAvailable) {
-            resultsSection.classList.remove('hidden');
-            loader.classList.add('hidden');
-            imageGrid.innerHTML = renderEmptyState({
-                icon: 'server-off',
-                title: 'Local Backend Required',
-                body: `Yandex Images uses JavaScript rendering — cloud proxies cannot scrape it.<br><br>
-                       <strong>Start the local backend:</strong><br>
-                       <code>cd backend &amp;&amp; python app.py</code><br><br>
-                       Then click Extract Images again.`,
-                note: 'The backend runs on your machine and scrapes using your real IP.'
-            });
-            imageCount.textContent = '0 images';
-            lucide.createIcons();
-            return;
-        }
-
         resultsSection.classList.add('hidden');
         loader.classList.remove('hidden');
         imageGrid.innerHTML = '';
@@ -231,31 +212,56 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        const isCloud = BACKEND_URL === RENDER_API;
-        loaderMsg.textContent = deepMode
-            ? `⚡ Deep scraping via ${isCloud ? 'cloud' : 'local'} backend (up to 1000+ images)…`
-            : `⚡ Scraping via ${isCloud ? 'cloud' : 'local'} backend…`;
+        loaderMsg.textContent = '⚡ Connecting to cloud backend (waking up if sleeping)…';
 
+        let targetApi = BACKEND_URL;
+        let res = null;
+
+        // Try primary BACKEND_URL first (Render cloud)
         try {
-            const res = await fetch(`${BACKEND_URL}/api/scrape`, {
+            res = await fetch(`${targetApi}/api/scrape`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, autoscroll: deepMode }),
-                signal: AbortSignal.timeout(300000)
+                signal: AbortSignal.timeout(60000) // 60s timeout for cold start + scrape
             });
+        } catch (e1) {
+            // Fallback to LOCAL_API if Render was unreachable
+            if (targetApi !== LOCAL_API) {
+                loaderMsg.textContent = '⚡ Trying local backend fallback…';
+                try {
+                    res = await fetch(`${LOCAL_API}/api/scrape`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url, autoscroll: deepMode }),
+                        signal: AbortSignal.timeout(60000)
+                    });
+                    if (res.ok) targetApi = LOCAL_API;
+                } catch (e2) {}
+            }
+        }
+
+        try {
+            if (!res || !res.ok) {
+                const errText = res ? await res.text() : 'Cloud backend is taking too long to wake up. Please wait 15 seconds and try again.';
+                throw new Error(errText);
+            }
             const data = await res.json();
             if (data.error) throw new Error(data.error);
             allImages = data.images || [];
+            BACKEND_URL = targetApi;
+            localAvailable = true;
+            updateStatusBadge();
         } catch (err) {
             loader.classList.add('hidden');
             resultsSection.classList.remove('hidden');
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'alert-triangle',
-                title: 'Scrape Failed',
-                body: err.message
+                title: 'Backend Starting Up',
+                body: `The free cloud server was sleeping and is now waking up.<br><br>Please wait <strong>10–15 seconds</strong> and click <strong>Extract Images</strong> again.`
             });
             imageCount.textContent = '0 images';
-            showToast('Scrape failed: ' + err.message, 'error');
+            showToast('Backend waking up — please try again in a few seconds', 'info');
             lucide.createIcons();
             return;
         }
