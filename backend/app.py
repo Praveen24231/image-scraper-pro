@@ -40,7 +40,28 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 
-def fetch_page(url: str, timeout=12) -> str:
+import threading
+import time
+
+def start_keep_alive():
+    """Background thread that pings Render health endpoint every 4 minutes to prevent sleep."""
+    def ping_loop():
+        time.sleep(10)
+        while True:
+            try:
+                requests.get("https://image-scraper-pro.onrender.com/api/health", timeout=10)
+                print("[keep-alive] Self-ping successful")
+            except Exception as e:
+                print(f"[keep-alive] Ping failed: {e}")
+            time.sleep(240)  # Ping every 4 minutes (Render sleeps after 15m)
+
+    t = threading.Thread(target=ping_loop, daemon=True)
+    t.start()
+
+start_keep_alive()
+
+
+def fetch_page(url: str, timeout=6) -> str:
     """Fetch a Yandex Images page. Returns raw HTML or empty string."""
     try:
         r = SESSION.get(url, timeout=timeout, allow_redirects=True)
@@ -94,19 +115,17 @@ def build_yandex_url(domain: str, text: str, page: int, extra: dict) -> str:
 
 
 def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
-    """Scrape up to max_pages in parallel. Returns list of image URLs."""
+    """Scrape up to max_pages in high-speed parallel workers (16 threads)."""
     all_urls = []
     seen = set()
 
     def fetch_page_urls(page: int):
         url = build_yandex_url(domain, text, page, extra)
-        html = fetch_page(url)
+        html = fetch_page(url, timeout=6)
         return extract_orig_urls(html)
 
-    # Page 0 first (fail-fast check)
+    # Page 0 first (fast initial result)
     page0 = fetch_page_urls(0)
-    if not page0:
-        return []
     for u in page0:
         if u not in seen:
             seen.add(u)
@@ -115,8 +134,8 @@ def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
     if max_pages <= 1:
         return all_urls
 
-    # Pages 1..max_pages in parallel (8 workers)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    # Pages 1..max_pages in parallel (16 high-speed workers)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         futures = {pool.submit(fetch_page_urls, p): p for p in range(1, max_pages)}
         for future in concurrent.futures.as_completed(futures):
             try:
