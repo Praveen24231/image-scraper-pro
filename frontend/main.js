@@ -212,70 +212,78 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        loaderMsg.textContent = '⚡ Connecting to cloud server (waking up if sleeping)…';
+        loaderMsg.textContent = '⚡ Extracting high-resolution images…';
 
-        let targetApi = BACKEND_URL;
-        let res = null;
+        let allExtracted = [];
 
-        // Attempt 1: Primary BACKEND_URL (Render cloud or local)
+        // Step 1: Instant 24/7 Vercel Serverless Scrape (0s sleep, works on every device)
         try {
-            res = await fetch(`${targetApi}/api/scrape`, {
+            const vRes = await fetch('/api/scrape', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, autoscroll: deepMode }),
-                signal: AbortSignal.timeout(120000) // 120s timeout for cold start + 1000+ images
+                signal: AbortSignal.timeout(12000)
             });
-        } catch (e1) {
-            console.warn('Fetch 1 failed, retrying Render cloud backend…', e1);
-            // Attempt 2: Auto-retry Render cloud after 3s delay (in case server was waking up)
-            loaderMsg.textContent = '⚡ Server waking up, retrying extraction…';
-            await new Promise(r => setTimeout(r, 3000));
+            if (vRes.ok) {
+                const vData = await vRes.json();
+                if (vData.images && vData.images.length > 0) {
+                    allExtracted = vData.images;
+                }
+            }
+        } catch (eVercel) {}
+
+        // Step 2: Render / Local Backend fallback for deep 1000+ image scraping
+        if (allExtracted.length < 5) {
+            let targetApi = BACKEND_URL;
+            let res = null;
+
             try {
-                res = await fetch(`${RENDER_API}/api/scrape`, {
+                res = await fetch(`${targetApi}/api/scrape`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ url, autoscroll: deepMode }),
-                    signal: AbortSignal.timeout(120000)
+                    signal: AbortSignal.timeout(60000)
                 });
-                if (res.ok) targetApi = RENDER_API;
-            } catch (e2) {
-                // Attempt 3: Try local backend fallback
+            } catch (e1) {
                 try {
-                    res = await fetch(`${LOCAL_API}/api/scrape`, {
+                    res = await fetch(`${RENDER_API}/api/scrape`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url, autoscroll: deepMode }),
-                        signal: AbortSignal.timeout(30000)
+                        signal: AbortSignal.timeout(60000)
                     });
-                    if (res.ok) targetApi = LOCAL_API;
-                } catch (e3) {}
+                } catch (e2) {}
+            }
+
+            if (res && res.ok) {
+                const rData = await res.json();
+                if (rData.images && rData.images.length > 0) {
+                    allExtracted = rData.images;
+                }
             }
         }
 
-        try {
-            if (!res || !res.ok) {
-                const errText = res ? await res.text() : 'Cloud backend is taking too long to wake up. Please wait 15 seconds and try again.';
-                throw new Error(errText);
-            }
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            allImages = data.images || [];
-            BACKEND_URL = targetApi;
-            localAvailable = true;
-            updateStatusBadge();
-        } catch (err) {
-            loader.classList.add('hidden');
-            resultsSection.classList.remove('hidden');
+        allImages = allExtracted;
+
+        loader.classList.add('hidden');
+        resultsSection.classList.remove('hidden');
+
+        if (!allImages.length) {
             imageGrid.innerHTML = renderEmptyState({
-                icon: 'alert-triangle',
-                title: 'Backend Starting Up',
-                body: `The free cloud server was sleeping and is now waking up.<br><br>Please wait <strong>10–15 seconds</strong> and click <strong>Extract Images</strong> again.`
+                icon: 'search-x',
+                title: 'No Images Found',
+                body: `Make sure your URL contains a search query:<br>
+                       <code>https://yandex.com/images/search?text=cats</code>`
             });
             imageCount.textContent = '0 images';
-            showToast('Backend waking up — please try again in a few seconds', 'info');
-            lucide.createIcons();
-            return;
+            showToast('No images found for this URL', 'info');
+        } else {
+            filterSelect.value = 'all';
+            applyFilter();
+            showToast(`Found ${allImages.length} images!`, 'success');
         }
+        lucide.createIcons();
+        return;
 
         loader.classList.add('hidden');
         resultsSection.classList.remove('hidden');
