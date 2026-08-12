@@ -570,8 +570,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // ── Mode 1: Local backend bulk ZIP (fastest, no per-image fetch needed)
-        if (localAvailable) {
+        // ── Mode 1: Backend bulk ZIP — only for ≤150 images (free tier 512MB RAM limit)
+        // For larger batches we go straight to in-browser JSZip which handles any size.
+        if (localAvailable && targets.length <= 150) {
             showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
             logEntry(`Requesting ZIP from local backend…`, 'success');
             progressBarFill.classList.add('indeterminate');
