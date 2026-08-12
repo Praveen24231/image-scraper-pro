@@ -606,8 +606,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // ── Mode 2: In-browser JSZip (works on HTTPS via /api/proxy)
         if (typeof JSZip === 'undefined') {
-            showToast('JSZip not loaded yet — please wait a moment and try again.', 'error');
-            return;
+            try {
+                await new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = 'jszip.min.js';
+                    s.onload = resolve;
+                    s.onerror = () => {
+                        const cdn = document.createElement('script');
+                        cdn.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+                        cdn.onload = resolve;
+                        cdn.onerror = reject;
+                        document.head.appendChild(cdn);
+                    };
+                    document.head.appendChild(s);
+                });
+            } catch {
+                showToast('Failed to load ZIP library. Please check your internet connection.', 'error');
+                return;
+            }
         }
 
         showModal(`Building ZIP — ${targets.length} images`, 'Fetching images…');
