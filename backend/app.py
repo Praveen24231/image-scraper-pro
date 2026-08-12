@@ -215,6 +215,15 @@ def parse_yandex_request(data: dict):
     return domain, text, extra
 
 
+@app.route("/")
+def index():
+    return jsonify({
+        "status": "online",
+        "service": "Image Scraper Pro Cloud Backend",
+        "version": "2.0"
+    }), 200
+
+
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
