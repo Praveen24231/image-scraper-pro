@@ -79,38 +79,62 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================================================
-    // LOCAL BACKEND DETECTION
-    // On HTTPS Vercel, http://localhost calls are blocked by Mixed Content.
-    // localAvailable will be false on Vercel — that is expected and correct.
+    // BACKEND DETECTION — tries Render.com cloud first, then localhost
+    // This means the app works fully online with zero local setup.
     // ==========================================================================
-    const LOCAL_API = 'http://localhost:5000';
+    const RENDER_API   = 'https://image-scraper-pro.onrender.com';
+    const LOCAL_API    = 'http://localhost:5000';
+    let BACKEND_URL    = RENDER_API;  // default: cloud backend
     let localAvailable = false;
-    let localCheckTs = 0;
-    const LOCAL_CHECK_TTL = 30000;
+    let localCheckTs   = 0;
+    const LOCAL_CHECK_TTL = 60000; // 60s cache
 
     async function checkLocalBackend(force = false) {
         const now = Date.now();
         if (!force && (now - localCheckTs) < LOCAL_CHECK_TTL) return;
         localCheckTs = now;
+
+        // 1. Try Render.com cloud backend first
+        try {
+            const r = await fetch(`${RENDER_API}/api/health`, { signal: AbortSignal.timeout(8000) });
+            if (r.ok) {
+                BACKEND_URL   = RENDER_API;
+                localAvailable = true;
+                updateStatusBadge();
+                return;
+            }
+        } catch {}
+
+        // 2. Try local backend (when running locally)
         try {
             const r = await fetch(`${LOCAL_API}/api/health`, { signal: AbortSignal.timeout(1500) });
-            localAvailable = r.ok;
-        } catch { localAvailable = false; }
+            if (r.ok) {
+                BACKEND_URL   = LOCAL_API;
+                localAvailable = true;
+                updateStatusBadge();
+                return;
+            }
+        } catch {}
+
+        localAvailable = false;
         updateStatusBadge();
     }
     checkLocalBackend(true);
 
     function updateStatusBadge() {
         if (!settingsDropdown) return;
+        const isCloud = BACKEND_URL === RENDER_API;
+        const label   = localAvailable
+            ? (isCloud ? 'Cloud Backend ✅' : 'Local Backend ✅')
+            : 'Backend Offline ❌';
         settingsDropdown.innerHTML = `<div style="font-size:12px;color:var(--text-dim);max-width:260px;">
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
                 <span style="width:8px;height:8px;border-radius:50%;background:${localAvailable ? '#5efb6e' : '#ff5c5c'};display:inline-block;flex-shrink:0;"></span>
-                <strong style="color:var(--text-main);">Local Backend: ${localAvailable ? 'CONNECTED ✅' : 'NOT RUNNING ❌'}</strong>
+                <strong style="color:var(--text-main);">${label}</strong>
             </div>
             ${localAvailable
-                ? '<span style="color:#5efb6e;">Scraping from your real IP — 1000+ images.</span>'
-                : `<span style="color:#ff8844;">Run local backend for scraping:<br>
-                   <code style="font-size:10px;background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;display:inline-block;margin-top:4px;">cd backend &amp;&amp; python app.py</code></span>`}
+                ? `<span style="color:#5efb6e;">${isCloud ? 'Using Render.com cloud — 1000+ images, no setup needed.' : 'Using local backend — 1000+ images.'}</span>`
+                : '<span style="color:#ff8844;">Backend is starting up… please wait 30s and try again.</span>'}
         </div>`;
         lucide.createIcons();
     }
@@ -207,12 +231,13 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
+        const isCloud = BACKEND_URL === RENDER_API;
         loaderMsg.textContent = deepMode
-            ? '⚡ Deep scraping via local backend (up to 1000+ images)…'
-            : '⚡ Scraping via local backend…';
+            ? `⚡ Deep scraping via ${isCloud ? 'cloud' : 'local'} backend (up to 1000+ images)…`
+            : `⚡ Scraping via ${isCloud ? 'cloud' : 'local'} backend…`;
 
         try {
-            const res = await fetch(`${LOCAL_API}/api/scrape`, {
+            const res = await fetch(`${BACKEND_URL}/api/scrape`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url, autoscroll: deepMode }),
@@ -276,8 +301,8 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
         await checkLocalBackend();
         try {
-            if (!localAvailable) throw new Error('Local backend not running. Run: cd backend && python app.py');
-            const res = await fetch(`${LOCAL_API}/api/count`, {
+            if (!localAvailable) throw new Error('Backend is offline. Please wait 30s and try again (cold start).');
+            const res = await fetch(`${BACKEND_URL}/api/count`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url }),
@@ -477,7 +502,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
         try {
-            const r = await fetch(`${LOCAL_API}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(15000) });
+            const r = await fetch(`${BACKEND_URL}/api/proxy_download?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(15000) });
             if (r.ok) { const b = await r.blob(); if (b.size > 500) return b; }
         } catch {}
         return null;
@@ -552,7 +577,7 @@ document.addEventListener('DOMContentLoaded', () => {
             progressBarFill.classList.add('indeterminate');
 
             try {
-                const res = await fetch(`${LOCAL_API}/api/download`, {
+                const res = await fetch(`${BACKEND_URL}/api/download`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ urls: targets.map(i => i.url) }),
