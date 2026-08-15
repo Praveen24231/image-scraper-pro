@@ -16,6 +16,7 @@ import requests
 import os
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from pinterest_scraper import extract_pinterest_pin
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -278,12 +279,8 @@ def index():
     return jsonify({
         "status": "online",
         "service": "Image Scraper Pro Cloud Backend",
-        "version": "2.0"
+        "version": "2.2-yandex-deep-pinterest"
     }), 200
-
-
-import os
-from pinterest_scraper import extract_pinterest_pin
 
 @app.route("/api/health")
 def health():
