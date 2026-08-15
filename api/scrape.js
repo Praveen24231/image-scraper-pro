@@ -1,6 +1,4 @@
 // api/scrape.js — 100% Vercel Serverless Yandex Scraper (Zero Sleep, 24/7 Live)
-import fetch from 'node-fetch';
-
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -36,19 +34,31 @@ export default async function handler(req, res) {
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://yandex.com/'
           },
-          timeout: 5000
+          signal: AbortSignal.timeout(5000)
         });
         const html = await response.text();
 
-        // Extract origUrl matches
-        const regex = /"origUrl"\s*:\s*"(https?[^"]+)"/g;
+        // 1. Extract origUrl matches
+        const origRegex = /"origUrl"\s*:\s*"(https?[^"]+)"/g;
         let match;
-        while ((match = regex.exec(html)) !== null) {
+        while ((match = origRegex.exec(html)) !== null) {
           const imgUrl = match[1].replace(/\\/g, '');
           if (!seen.has(imgUrl) && imgUrl.startsWith('http')) {
             seen.add(imgUrl);
             allUrls.push(imgUrl);
           }
+        }
+
+        // 2. Extract img_url parameter matches
+        const imgUrlRegex = /img_url=([^&"'\s<>]+)/g;
+        while ((match = imgUrlRegex.exec(html)) !== null) {
+          try {
+            const imgUrl = decodeURIComponent(match[1]).replace(/\\/g, '');
+            if (!seen.has(imgUrl) && imgUrl.startsWith('http')) {
+              seen.add(imgUrl);
+              allUrls.push(imgUrl);
+            }
+          } catch (e) {}
         }
       } catch (e) {}
     };

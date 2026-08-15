@@ -76,13 +76,20 @@
 
         <!-- Scraping Input Form -->
         <section class="input-section" aria-label="URL Submission">
+            <div class="source-selector-bar">
+                <label for="sourceSelect" class="source-label">Search Engine:</label>
+                <select id="sourceSelect" class="source-select" aria-label="Select Search Engine or Platform">
+                    <option value="yandex" selected>Yandex</option>
+                    <option value="pinterest">Pinterest</option>
+                </select>
+            </div>
             <div class="input-wrapper">
-                <input type="text" id="urlInput" placeholder="https://yandex.com/images/search?text=cats" aria-label="Yandex Images URL" />
+                <input type="text" id="urlInput" placeholder="https://yandex.com/images/search?text=cats" aria-label="Target Images URL" />
                 <button id="countBtn" class="btn-count" aria-label="Count images on page" title="Quick-count images on this page">
                     <i data-lucide="hash" aria-hidden="true"></i>
                     <span class="btn-text btn-count-text">Count</span>
                 </button>
-                <div class="toggle-group">
+                <div id="deepScrapeToggleGroup" class="toggle-group">
                     <label class="switch" for="autoscrollToggle">
                         <input type="checkbox" id="autoscrollToggle" checked>
                         <span class="slider round"></span>

@@ -18,18 +18,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================================================
     // DOM REFS
     // ==========================================================================
-    const urlInput            = document.getElementById('urlInput');
-    const scrapeBtn           = document.getElementById('scrapeBtn');
-    const loader              = document.getElementById('loader');
-    const loaderMsg           = document.getElementById('loaderMsg');
-    const resultsSection      = document.getElementById('resultsSection');
-    const imageGrid           = document.getElementById('imageGrid');
-    const imageCount          = document.getElementById('imageCount');
-    const downloadBtn         = document.getElementById('downloadBtn');
-    const downloadZipBtn      = document.getElementById('downloadZipBtn');
-    const autoscrollToggle    = document.getElementById('autoscrollToggle');
-    const filterSelect        = document.getElementById('filterSelect');
-    const countBtn            = document.getElementById('countBtn');
+    const sourceSelect            = document.getElementById('sourceSelect');
+    const deepScrapeToggleGroup   = document.getElementById('deepScrapeToggleGroup');
+    const urlInput                = document.getElementById('urlInput');
+    const scrapeBtn               = document.getElementById('scrapeBtn');
+    const loader                  = document.getElementById('loader');
+    const loaderMsg               = document.getElementById('loaderMsg');
+    const resultsSection          = document.getElementById('resultsSection');
+    const imageGrid               = document.getElementById('imageGrid');
+    const imageCount              = document.getElementById('imageCount');
+    const downloadBtn             = document.getElementById('downloadBtn');
+    const downloadZipBtn          = document.getElementById('downloadZipBtn');
+    const autoscrollToggle        = document.getElementById('autoscrollToggle');
+    const filterSelect            = document.getElementById('filterSelect');
+    const countBtn                = document.getElementById('countBtn');
     const countPanel          = document.getElementById('countPanel');
     const countTotal          = document.getElementById('countTotal');
     const countMethodBadge    = document.getElementById('countMethodBadge');
@@ -94,22 +96,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!force && (now - localCheckTs) < LOCAL_CHECK_TTL) return;
         localCheckTs = now;
 
-        // 1. Try Render.com cloud backend first
+        // 1. Try local backend first (when running locally)
         try {
-            const r = await fetch(`${RENDER_API}/api/health`, { signal: AbortSignal.timeout(8000) });
+            const r = await fetch(`${LOCAL_API}/api/health`, { signal: AbortSignal.timeout(1500) });
             if (r.ok) {
-                BACKEND_URL   = RENDER_API;
+                BACKEND_URL   = LOCAL_API;
                 localAvailable = true;
                 updateStatusBadge();
                 return;
             }
         } catch {}
 
-        // 2. Try local backend (when running locally)
+        // 2. Try Render.com cloud backend
         try {
-            const r = await fetch(`${LOCAL_API}/api/health`, { signal: AbortSignal.timeout(1500) });
+            const r = await fetch(`${RENDER_API}/api/health`, { signal: AbortSignal.timeout(8000) });
             if (r.ok) {
-                BACKEND_URL   = LOCAL_API;
+                BACKEND_URL   = RENDER_API;
                 localAvailable = true;
                 updateStatusBadge();
                 return;
@@ -180,6 +182,100 @@ document.addEventListener('DOMContentLoaded', () => {
 
     urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') scrapeBtn.click(); });
 
+    if (sourceSelect) {
+        sourceSelect.addEventListener('change', () => {
+            const isPinterest = sourceSelect.value === 'pinterest';
+            if (isPinterest) {
+                urlInput.placeholder = 'https://in.pinterest.com/pin/1136033074757270594/ or /visual-search/';
+                urlInput.setAttribute('aria-label', 'Pinterest Pin or Visual Search URL');
+                countBtn.style.display = 'none';
+                if (deepScrapeToggleGroup) deepScrapeToggleGroup.style.display = 'none';
+                const textSpan = scrapeBtn.querySelector('.btn-text');
+                if (textSpan) textSpan.textContent = 'Extract Images';
+                countPanel.classList.add('hidden');
+            } else {
+                urlInput.placeholder = 'https://yandex.com/images/search?text=cats';
+                urlInput.setAttribute('aria-label', 'Yandex Images URL');
+                countBtn.style.display = '';
+                if (deepScrapeToggleGroup) deepScrapeToggleGroup.style.display = '';
+                const textSpan = scrapeBtn.querySelector('.btn-text');
+                if (textSpan) textSpan.textContent = 'Extract Images';
+            }
+        });
+    }
+
+    async function extractPinterest(pinUrl) {
+        const pinPattern = /https?:\/\/(?:[a-z0-9\-]+\.)?pinterest\.(?:com|[a-z]{2,3}(?:\.[a-z]{2})?)\/pin\//i;
+        const pinItPattern = /https?:\/\/pin\.it\//i;
+        if (!pinPattern.test(pinUrl) && !pinItPattern.test(pinUrl)) {
+            showToast('Invalid Pinterest Pin or Visual Search URL. Please verify the link and try again.', 'error');
+            return;
+        }
+
+        resultsSection.classList.add('hidden');
+        loader.classList.remove('hidden');
+        imageGrid.innerHTML = '';
+        allImages = []; filteredImages = [];
+        selectedUrls.clear();
+        updateSelectionUI();
+        countPanel.classList.add('hidden');
+
+        loaderMsg.textContent = '⚡ Dynamically extracting Pinterest images (target 300+)… hold on!';
+
+        const endpoints = [];
+        if (window.PINTEREST_SCRAPER_URL) {
+            endpoints.push(`${window.PINTEREST_SCRAPER_URL.replace(/\/$/, '')}/api/pinterest/extract`);
+        }
+        endpoints.push(
+            `${BACKEND_URL}/api/pinterest/extract`,
+            `${RENDER_API}/api/pinterest/extract`,
+            `${LOCAL_API}/api/pinterest/extract`
+        );
+        const uniqueEndpoints = [...new Set(endpoints)];
+
+        let extractedData = null;
+        let errMsg = 'Unable to extract images from this Pinterest link. Please verify the URL and try again.';
+
+        for (const endpoint of uniqueEndpoints) {
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: pinUrl, min_target: 300, max_images: 1000 }),
+                    signal: AbortSignal.timeout(45000)
+                });
+                const data = await res.json();
+                if (res.ok && data.success && data.images && data.images.length > 0) {
+                    extractedData = data;
+                    break;
+                } else if (data.error) {
+                    errMsg = data.error;
+                }
+            } catch (e) {
+                console.warn('[pinterest] Endpoint failed:', endpoint, e);
+            }
+        }
+
+        loader.classList.add('hidden');
+        resultsSection.classList.remove('hidden');
+
+        if (!extractedData || !extractedData.images || extractedData.images.length === 0) {
+            imageGrid.innerHTML = renderEmptyState({
+                icon: 'search-x',
+                title: 'Extraction Failed',
+                body: `${errMsg}<br><br>Please verify the Pinterest URL and try again.`
+            });
+            imageCount.textContent = '0 images';
+            showToast(errMsg, 'error');
+        } else {
+            allImages = extractedData.images;
+            filterSelect.value = 'all';
+            applyFilter();
+            showToast(`Extracted ${allImages.length} Main + Related image(s) from Pinterest!`, 'success');
+        }
+        lucide.createIcons();
+    }
+
     // ==========================================================================
     // HELPERS
     // ==========================================================================
@@ -199,8 +295,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const url = urlInput.value.trim();
         if (!url) {
             urlInput.focus();
-            showToast('Please enter a Yandex Images URL', 'error');
+            const isPinterest = sourceSelect && sourceSelect.value === 'pinterest';
+            showToast(isPinterest ? 'Please enter a Pinterest Pin URL' : 'Please enter a Yandex Images URL', 'error');
             return;
+        }
+
+        if (sourceSelect && sourceSelect.value === 'pinterest') {
+            return extractPinterest(url);
         }
 
         resultsSection.classList.add('hidden');
@@ -216,18 +317,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let extracted = [];
         const endpoints = [
-            `${RENDER_API}/api/scrape`,
-            `${LOCAL_API}/api/scrape`
+            `${BACKEND_URL}/api/scrape`,
+            `${LOCAL_API}/api/scrape`,
+            `/api/scrape`,
+            `${RENDER_API}/api/scrape`
         ];
+        const uniqueEndpoints = [...new Set(endpoints)];
 
         // Retry loop: try up to 3 times to handle Render cold-start wakeups gracefully
         for (let attempt = 1; attempt <= 3; attempt++) {
             if (attempt > 1) {
                 loaderMsg.textContent = `⚡ Cloud server waking up, retrying extraction (attempt ${attempt}/3)…`;
-                await new Promise(r => setTimeout(r, 4000));
+                await new Promise(r => setTimeout(r, 3000));
             }
 
-            for (const endpoint of endpoints) {
+            for (const endpoint of uniqueEndpoints) {
                 try {
                     const res = await fetch(endpoint, {
                         method: 'POST',
@@ -239,9 +343,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         const data = await res.json();
                         if (data.images && data.images.length > 0) {
                             extracted = data.images;
-                            BACKEND_URL = endpoint.replace('/api/scrape', '');
-                            localAvailable = true;
-                            updateStatusBadge();
+                            if (endpoint.startsWith('http')) {
+                                BACKEND_URL = endpoint.replace('/api/scrape', '');
+                                localAvailable = true;
+                                updateStatusBadge();
+                            }
                             break;
                         }
                     }

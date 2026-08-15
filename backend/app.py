@@ -13,10 +13,11 @@ from html import unescape
 from urllib.parse import urlparse, urlencode, parse_qs
 
 import requests
+import os
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -73,6 +74,7 @@ def fetch_page(url: str, timeout=6) -> str:
 
 
 ORIGURL_RE = re.compile(r'"origUrl"\s*:\s*"(https?[^"]+)"')
+IMGURL_PARAM_RE = re.compile(r'img_url=([^&"\'<>\s]+)')
 CDN_RE     = re.compile(r'https://avatars\.mds\.yandex\.net/[^\s"\'<>\\,\)]+')
 
 
@@ -91,6 +93,17 @@ def extract_orig_urls(html: str) -> list:
         if url not in seen and url.startswith("http"):
             seen.add(url)
             results.append(url)
+
+    # Secondary: img_url parameters from dynamic serp image cards
+    for m in IMGURL_PARAM_RE.finditer(decoded):
+        raw_u = m.group(1)
+        try:
+            url = unquote(raw_u).replace("\\/", "/")
+            if url not in seen and url.startswith("http"):
+                seen.add(url)
+                results.append(url)
+        except Exception:
+            pass
 
     # Fallback: Yandex CDN thumbnails → upgrade to /orig
     if len(results) < 5:
@@ -141,11 +154,26 @@ def scrape_yandex_playwright(target_url: str) -> list:
 
             # Scroll down to load images dynamically
             for _ in range(8):
-                page.evaluate("window.scrollBy(0, 1500)")
-                page.wait_for_timeout(500)
+                page.evaluate("window.scrollBy(0, 2500)")
+                page.wait_for_timeout(600)
 
             content = page.content()
             urls = extract_orig_urls(content)
+
+            # Also extract direct img_url links from DOM
+            dom_links = page.evaluate("""() => {
+                return Array.from(document.querySelectorAll('a[href*="img_url="]')).map(a => a.href);
+            }""")
+            for l in dom_links:
+                for m in IMGURL_PARAM_RE.finditer(l):
+                    try:
+                        u = unquote(m.group(1)).replace("\\/", "/")
+                        if u not in seen and u.startswith("http"):
+                            seen.add(u)
+                            urls.append(u)
+                    except Exception:
+                        pass
+
             browser.close()
             print(f"[playwright] Successfully extracted {len(urls)} images via Playwright")
     except Exception as e:
@@ -200,23 +228,37 @@ def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
 
 def parse_yandex_request(data: dict):
     """Parse and validate a Yandex scrape request. Returns (domain, text, extra) or raises."""
-    url  = data.get("url", "").strip()
+    url = data.get("url", "").strip()
     if not url:
         raise ValueError("URL is required")
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        if "yandex." in url:
+            url = "https://" + url
+        else:
+            # User entered search query text directly
+            return "yandex.com", url, {}
+
     u = urlparse(url)
-    if "yandex" not in u.netloc:
-        raise ValueError("Only Yandex Images URLs are supported")
+    if "yandex" not in u.netloc and u.netloc:
+        raise ValueError("Only Yandex Images URLs are supported. Example: https://yandex.com/images/search?text=cats")
+
     params = parse_qs(u.query)
-    text   = (params.get("text") or params.get("query") or [""])[0].strip()
+    text = (params.get("text") or params.get("query") or params.get("q") or [""])[0].strip()
     if not text:
-        raise ValueError("No search text found in URL. Example: https://yandex.com/images/search?text=cats")
-    extra  = {k: v[0] for k, v in params.items() if k not in ("text", "p", "format")}
-    domain = u.netloc
+        text = "wallpaper"
+
+    extra = {k: v[0] for k, v in params.items() if k not in ("text", "query", "q", "p", "format")}
+    domain = u.netloc or "yandex.com"
     return domain, text, extra
 
 
 @app.route("/")
 def index():
+    index_path = os.path.join(app.static_folder or "static", "index.html")
+    accept = request.headers.get("Accept", "")
+    if ("text/html" in accept or "application/json" not in accept) and os.path.exists(index_path):
+        return send_file(index_path)
     return jsonify({
         "status": "online",
         "service": "Image Scraper Pro Cloud Backend",
@@ -224,9 +266,40 @@ def index():
     }), 200
 
 
+import os
+from pinterest_scraper import extract_pinterest_pin
+
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/pinterest/extract", methods=["POST", "OPTIONS"])
+def api_pinterest_extract():
+    """Extract highest-resolution image from a Pinterest Pin URL."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    data = request.json or {}
+    url = data.get("url", "").strip()
+    max_images = int(data.get("max_images", 1000))
+    min_target = int(data.get("min_target", 300))
+    if not url:
+        return jsonify({"success": False, "error": "Pinterest Pin URL is required"}), 400
+
+    # Check if a dedicated live Pinterest scraper instance URL is set
+    pinterest_live_url = os.getenv("PINTEREST_SCRAPER_URL", "").rstrip("/")
+    if pinterest_live_url and pinterest_live_url not in request.host_url:
+        try:
+            r = requests.post(f"{pinterest_live_url}/api/pinterest/extract", json={"url": url, "max_images": max_images, "min_target": min_target}, timeout=35)
+            return (r.content, r.status_code, [("Content-Type", "application/json")])
+        except Exception as e:
+            print(f"[pinterest-proxy] Remote scraper failed ({e}), using local extractor")
+
+    res = extract_pinterest_pin(url, max_images=max_images, min_target=min_target)
+    status_code = 200 if res.get("success") else 400
+    return jsonify(res), status_code
+
 
 
 @app.route("/api/count", methods=["POST", "OPTIONS"])
