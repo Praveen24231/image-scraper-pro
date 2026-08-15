@@ -127,11 +127,11 @@ def build_yandex_url(domain: str, text: str, page: int, extra: dict) -> str:
     return f"https://{domain}/images/search?{urlencode(params)}"
 
 
-def scrape_yandex_playwright(target_url: str) -> list:
-    """Fallback Headless Chromium Playwright scraper for captcha/bot-protected requests."""
+def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool = True) -> list:
+    """Headless Chromium Playwright scraper for deep Yandex SERP extraction up to max_images."""
     from playwright.sync_api import sync_playwright
-    print(f"[playwright] Launching Chromium browser for: {target_url[:80]}...")
-    urls = []
+    print(f"[playwright] Launching Chromium browser for: {target_url[:80]} (target={max_images}, deep={deep})...")
+    collected_urls = []
     seen = set()
     try:
         with sync_playwright() as p:
@@ -150,80 +150,96 @@ def scrape_yandex_playwright(target_url: str) -> list:
             )
             page = context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(2500)
 
-            # Scroll down to load images dynamically
-            for _ in range(8):
-                page.evaluate("window.scrollBy(0, 2500)")
-                page.wait_for_timeout(600)
+            def extract_batch():
+                added = 0
+                dom_urls = page.evaluate("""() => {
+                    const urls = [];
+                    document.querySelectorAll('a[href*="img_url="]').forEach(a => {
+                        try {
+                            const u = new URL(a.href);
+                            const raw = u.searchParams.get('img_url');
+                            if (raw) { urls.push(decodeURIComponent(raw)); }
+                        } catch(e) {}
+                    });
+                    return urls;
+                }""")
+                for u in dom_urls:
+                    clean_u = u.replace("\\/", "/")
+                    if clean_u not in seen and clean_u.startswith("http"):
+                        seen.add(clean_u)
+                        collected_urls.append(clean_u)
+                        added += 1
 
-            content = page.content()
-            urls = extract_orig_urls(content)
+                html = page.content()
+                decoded = unescape(html)
+                for m in ORIGURL_RE.finditer(decoded):
+                    u = m.group(1).replace("\\/", "/")
+                    if u not in seen and u.startswith("http"):
+                        seen.add(u)
+                        collected_urls.append(u)
+                        added += 1
 
-            # Also extract direct img_url links from DOM
-            dom_links = page.evaluate("""() => {
-                return Array.from(document.querySelectorAll('a[href*="img_url="]')).map(a => a.href);
-            }""")
-            for l in dom_links:
-                for m in IMGURL_PARAM_RE.finditer(l):
-                    try:
-                        u = unquote(m.group(1)).replace("\\/", "/")
-                        if u not in seen and u.startswith("http"):
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        pass
+                for m in CDN_RE.finditer(decoded):
+                    raw = m.group(0).split("?")[0]
+                    parts = raw.split("/")
+                    if len(parts) >= 5:
+                        if parts[-1] not in ("orig", "original"):
+                            parts[-1] = "orig"
+                        upgraded = "/".join(parts)
+                        if upgraded not in seen:
+                            seen.add(upgraded)
+                            collected_urls.append(upgraded)
+                            added += 1
+
+                return added
+
+            # Initial extract
+            extract_batch()
+
+            if deep:
+                max_scrolls = 40
+                no_new_scrolls = 0
+                for s in range(1, max_scrolls + 1):
+                    if len(collected_urls) >= max_images:
+                        break
+
+                    page.evaluate("window.scrollBy(0, 3000)")
+                    page.wait_for_timeout(800)
+
+                    # Click "show more" button if visible
+                    page.evaluate("""() => {
+                        const btn = document.querySelector('.more__button, .button_theme_action, .more__btn, [data-bem*="more"]');
+                        if (btn && btn.offsetParent !== null) { btn.click(); }
+                    }""")
+
+                    added = extract_batch()
+                    if added == 0:
+                        no_new_scrolls += 1
+                        if no_new_scrolls >= 4:
+                            break
+                    else:
+                        no_new_scrolls = 0
 
             browser.close()
-            print(f"[playwright] Successfully extracted {len(urls)} images via Playwright")
+            print(f"[playwright] Successfully extracted {len(collected_urls)} unique high-res images via Playwright")
     except Exception as e:
         print(f"[playwright] Error during rendering: {e}")
-    return urls
+    return collected_urls[:max_images]
 
 
-def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34) -> list:
-    """Scrape up to max_pages in high-speed parallel workers (16 threads). Uses Playwright fallback if needed."""
-    all_urls = []
-    seen = set()
+def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34, deep=True, max_images=1000) -> list:
+    """Scrape up to max_images using deep Playwright progressive scrolling (or fast requests if not deep)."""
+    first_url = build_yandex_url(domain, text, 0, extra)
+    if deep:
+        return scrape_yandex_playwright(first_url, max_images=max_images, deep=True)
 
-    def fetch_page_urls(page: int):
-        url = build_yandex_url(domain, text, page, extra)
-        html = fetch_page(url, timeout=6)
-        return extract_orig_urls(html)
-
-    # Page 0 first (fast initial result)
-    page0 = fetch_page_urls(0)
-    for u in page0:
-        if u not in seen:
-            seen.add(u)
-            all_urls.append(u)
-
-    # If HTTP requests return 0 images (e.g. Yandex bot block), use Playwright Chromium fallback!
-    if not all_urls:
-        first_url = build_yandex_url(domain, text, 0, extra)
-        pw_urls = scrape_yandex_playwright(first_url)
-        for u in pw_urls:
-            if u not in seen:
-                seen.add(u)
-                all_urls.append(u)
-
-    if max_pages <= 1 or not all_urls:
-        return all_urls
-
-    # Pages 1..max_pages in parallel (16 high-speed workers)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        futures = {pool.submit(fetch_page_urls, p): p for p in range(1, max_pages)}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                urls = future.result()
-                for u in urls:
-                    if u not in seen:
-                        seen.add(u)
-                        all_urls.append(u)
-            except Exception:
-                pass
-
-    return all_urls
+    # Fast non-deep mode:
+    urls = extract_orig_urls(fetch_page(first_url, timeout=6))
+    if not urls:
+        urls = scrape_yandex_playwright(first_url, max_images=30, deep=False)
+    return urls[:max_images]
 
 
 def parse_yandex_request(data: dict):
@@ -341,11 +357,12 @@ def api_scrape():
         return jsonify({"error": str(e)}), 400
 
     max_pages = 34 if deep else 1
+    max_target = int(data.get("max_images", 1000 if deep else 30))
     try:
-        urls = scrape_yandex(domain, text, extra, max_pages=max_pages)
+        urls = scrape_yandex(domain, text, extra, max_pages=max_pages, deep=deep, max_images=max_target)
         images = [{"url": u, "thumb": u, "alt": "", "width": "Original", "height": "Original"} for u in urls]
         print(f"[scrape] Found {len(images)} images for '{text}'")
-        return jsonify({"images": images})
+        return jsonify({"images": images, "count": len(images)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
