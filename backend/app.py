@@ -152,8 +152,8 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 viewport={"width": 1920, "height": 1080}
             )
             page = context.new_page()
-            page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(1200)
+            page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
+            page.wait_for_timeout(800)
 
             def extract_batch():
                 added = 0
@@ -202,14 +202,10 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
             extract_batch()
 
             if deep:
-                max_scrolls = 6
-                no_new_scrolls = 0
-                for s in range(1, max_scrolls + 1):
-                    if len(collected_urls) >= max_images:
-                        break
-
+                t_scroll_start = time.time()
+                while time.time() - t_scroll_start < 12.0 and len(collected_urls) < max_images:
                     page.evaluate("window.scrollBy(0, 15000)")
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(250)
 
                     # Click "show more" button if visible
                     page.evaluate("""() => {
@@ -218,12 +214,8 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                     }""")
 
                     added = extract_batch()
-                    if added == 0:
-                        no_new_scrolls += 1
-                        if no_new_scrolls >= 3:
-                            break
-                    else:
-                        no_new_scrolls = 0
+                    if added == 0 and time.time() - t_scroll_start > 6.0:
+                        break
 
             browser.close()
             print(f"[playwright] Successfully extracted {len(collected_urls)} unique high-res images via Playwright")
