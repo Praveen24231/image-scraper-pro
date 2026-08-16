@@ -202,14 +202,14 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
             extract_batch()
 
             if deep:
-                max_scrolls = 14
+                max_scrolls = 6
                 no_new_scrolls = 0
                 for s in range(1, max_scrolls + 1):
                     if len(collected_urls) >= max_images:
                         break
 
-                    page.evaluate("window.scrollBy(0, 10000)")
-                    page.wait_for_timeout(350)
+                    page.evaluate("window.scrollBy(0, 15000)")
+                    page.wait_for_timeout(300)
 
                     # Click "show more" button if visible
                     page.evaluate("""() => {
