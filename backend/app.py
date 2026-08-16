@@ -17,6 +17,8 @@ import os
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from pinterest_scraper import extract_pinterest_pin
+from pinterest_resource_scraper import extract_pinterest_resource_api
+
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -279,108 +281,18 @@ def index():
     return jsonify({
         "status": "online",
         "service": "Image Scraper Pro Cloud Backend",
-        "version": "2.2-yandex-deep-pinterest"
+        "version": "2.3-pinterest-resource-api"
     }), 200
+
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok"})
-
-
-@app.route("/api/diagnose/pinterest", methods=["GET", "POST"])
-def api_diagnose_pinterest():
-    """Production Diagnostic endpoint for Pinterest network, HTTP, and Playwright behavior."""
-    target_url = request.args.get("url") or "https://in.pinterest.com/pin/1062075524624293007/"
-    report = {"target_url": target_url}
-
-    # 1. HTTP Request Diagnostic
-    t0 = time.time()
-    try:
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        r = session.get(target_url, timeout=15, allow_redirects=True)
-        http_time = time.time() - t0
-        raw_html = r.text
-        
-        img_matches = re.findall(r'https?://i\.pinimg\.com/[0-9a-z_x/]+/[0-9a-f/]+\.(?:jpg|png|webp)', raw_html, re.IGNORECASE)
-        ideas_matches = re.findall(r'href=["\'](/ideas/[a-zA-Z0-9_\-\/]+)["\']', raw_html)
-        
-        report["http_diagnostic"] = {
-            "status_code": r.status_code,
-            "response_time_sec": round(http_time, 2),
-            "response_bytes": len(raw_html),
-            "final_url": r.url,
-            "has_pin_id": "1062075524624293007" in raw_html,
-            "image_urls_found": len(set(img_matches)),
-            "ideas_links_found": len(set(ideas_matches)),
-            "is_challenge_or_login": ("login" in r.url or "challenge" in r.url or "captcha" in raw_html.lower()),
-            "title_tag": re.findall(r'<title>(.*?)</title>', raw_html, re.IGNORECASE)[:1],
-            "sample_snippet": raw_html[:400]
-        }
-    except Exception as e:
-        report["http_diagnostic"] = {"error": str(e), "time_sec": round(time.time() - t0, 2)}
-
-    # 2. Playwright Chromium Diagnostic
-    pw_t0 = time.time()
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            pw_launch_t0 = time.time()
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-            )
-            pw_launch_time = time.time() - pw_launch_t0
-            
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                viewport={"width": 1920, "height": 1080}
-            )
-            page = context.new_page()
-            
-            console_msgs = []
-            page.on("console", lambda m: console_msgs.append(f"[{m.type}] {m.text}"))
-            
-            nav_t0 = time.time()
-            res = page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
-            nav_time = time.time() - nav_t0
-            
-            pw_html = page.content()
-            pw_imgs = re.findall(r'https?://i\.pinimg\.com/[0-9a-z_x/]+/[0-9a-f/]+\.(?:jpg|png|webp)', pw_html, re.IGNORECASE)
-            
-            dom_ideas = page.evaluate("""() => {
-                return Array.from(document.querySelectorAll('a[href*="/ideas/"]')).map(a => a.href);
-            }""")
-            
-            report["playwright_diagnostic"] = {
-                "launched": True,
-                "launch_time_sec": round(pw_launch_time, 2),
-                "nav_status": res.status if res else None,
-                "nav_time_sec": round(nav_time, 2),
-                "final_url": page.url,
-                "html_bytes": len(pw_html),
-                "has_pin_id": "1062075524624293007" in pw_html,
-                "image_urls_found": len(set(pw_imgs)),
-                "ideas_links_found": len(set(dom_ideas)),
-                "page_title": page.title()[:100],
-                "is_challenge_or_login": ("login" in page.url or "challenge" in page.url or "captcha" in pw_html.lower()),
-                "sample_console_logs": console_msgs[:5]
-            }
-            browser.close()
-    except Exception as e:
-        report["playwright_diagnostic"] = {
-            "launched": False,
-            "error": str(e),
-            "total_time_sec": round(time.time() - pw_t0, 2)
-        }
-
-    return jsonify(report)
-
+    return jsonify({"status": "ok", "version": "2.3-pinterest-resource-api"})
 
 
 @app.route("/api/pinterest/extract", methods=["POST", "OPTIONS"])
 def api_pinterest_extract():
-    """Extract highest-resolution image from a Pinterest Pin URL."""
+    """Extract high-resolution images from a Pinterest Pin URL using Resource API (with Playwright fallback)."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -391,15 +303,15 @@ def api_pinterest_extract():
     if not url:
         return jsonify({"success": False, "error": "Pinterest Pin URL is required"}), 400
 
-    # Check if a dedicated live Pinterest scraper instance URL is set
-    pinterest_live_url = os.getenv("PINTEREST_SCRAPER_URL", "").rstrip("/")
-    if pinterest_live_url and pinterest_live_url not in request.host_url:
-        try:
-            r = requests.post(f"{pinterest_live_url}/api/pinterest/extract", json={"url": url, "max_images": max_images, "min_target": min_target}, timeout=35)
-            return (r.content, r.status_code, [("Content-Type", "application/json")])
-        except Exception as e:
-            print(f"[pinterest-proxy] Remote scraper failed ({e}), using local extractor")
+    # Primary: Fast, lightweight native Pinterest JSON Resource API
+    try:
+        res = extract_pinterest_resource_api(url, max_images=max_images, min_target=min_target)
+        if res.get("success") and len(res.get("images", [])) > 0:
+            return jsonify(res), 200
+    except Exception as e:
+        print(f"[pinterest-api] Resource API extraction warning: {e}")
 
+    # Fallback: Playwright / HTTP Pin Extractor
     res = extract_pinterest_pin(url, max_images=max_images, min_target=min_target)
     status_code = 200 if res.get("success") else 400
     return jsonify(res), status_code
