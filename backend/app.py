@@ -152,8 +152,11 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 viewport={"width": 1920, "height": 1080}
             )
             page = context.new_page()
-            page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
-            page.wait_for_timeout(800)
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=7000)
+            except Exception:
+                pass
+            page.wait_for_timeout(600)
 
             def extract_batch():
                 added = 0
@@ -205,7 +208,7 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 t_scroll_start = time.time()
                 while time.time() - t_scroll_start < 12.0 and len(collected_urls) < max_images:
                     page.evaluate("window.scrollBy(0, 15000)")
-                    page.wait_for_timeout(250)
+                    page.wait_for_timeout(200)
 
                     # Click "show more" button if visible
                     page.evaluate("""() => {
@@ -214,7 +217,7 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                     }""")
 
                     added = extract_batch()
-                    if added == 0 and time.time() - t_scroll_start > 6.0:
+                    if added == 0 and time.time() - t_scroll_start > 5.0:
                         break
 
             browser.close()
