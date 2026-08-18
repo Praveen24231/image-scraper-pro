@@ -184,26 +184,31 @@ def scrape_pinterest_hybrid_playwright(target_url: str, min_target: int = DEFAUL
                 safe_title = main_title.encode("ascii", "replace").decode("ascii")
                 print(f"MAIN PIN IMAGES: {main_pin_images_count} (Title: '{safe_title}')")
 
-                # STEP 3: Discover /ideas/... topic cluster links from DOM & HTML
-                dom_idea_links = page.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('a[href*="/ideas/"]')).map(a => a.href);
-                    return links;
-                }""")
+                # STEP 3: Discover specific /ideas/... topic cluster links from Pin's native annotations
+                target_annotations = []
+                va_match = re.search(r'"visualAnnotation"\s*:\s*(\[[^\]]+\])', html_initial)
+                if va_match:
+                    try:
+                        for va in json.loads(va_match.group(1)):
+                            clean_va = unescape(str(va)).strip()
+                            if clean_va and clean_va not in target_annotations:
+                                target_annotations.append(clean_va)
+                    except Exception:
+                        pass
 
-                html_idea_matches = re.findall(r'href=["\'](/ideas/[a-zA-Z0-9_\-\/]+)["\']', html_initial)
-                for rel_href in html_idea_matches:
-                    full_href = f"https://www.pinterest.com{rel_href}"
-                    dom_idea_links.append(full_href)
-
-                # Clean and deduplicate topic URLs
+                # Extract specific topic URLs from target Pin's annotationsWithLinksArray
+                awl_matches = re.findall(r'\{"name":"([^"]+)","url":"(/ideas/[^"]+)"\}', html_initial)
                 seen_topics = set()
-                for link in dom_idea_links:
-                    cleaned_link = link.split("?")[0].rstrip("/") + "/"
-                    if "/ideas/" in cleaned_link and cleaned_link not in seen_topics:
-                        seen_topics.add(cleaned_link)
-                        discovered_topic_urls.append(cleaned_link)
+                for name, topic_path in awl_matches:
+                    u_name = unescape(name).strip()
+                    if u_name and u_name not in target_annotations:
+                        target_annotations.append(u_name)
+                    full_href = f"https://www.pinterest.com{topic_path}".split("?")[0].rstrip("/") + "/"
+                    if full_href not in seen_topics:
+                        seen_topics.add(full_href)
+                        discovered_topic_urls.append(full_href)
 
-                print(f"RELATED /ideas/ LINKS FOUND: {len(discovered_topic_urls)}")
+                print(f"RELATED TARGET TOPIC LINKS FOUND: {len(discovered_topic_urls)}")
                 for idx, t_url in enumerate(discovered_topic_urls[:10]):
                     print(f"  Topic [{idx+1}]: {t_url}")
 

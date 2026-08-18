@@ -136,6 +136,18 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
     print(f"[playwright] Launching Chromium browser for: {target_url[:80]} (target={max_images}, deep={deep})...")
     collected_urls = []
     seen = set()
+    
+    # Detailed pipeline counters
+    metrics = {
+        "raw_candidates": 0,
+        "dom_img_urls": 0,
+        "json_orig_urls": 0,
+        "cdn_upgraded_urls": 0,
+        "rejected_invalid": 0,
+        "duplicates_removed": 0,
+        "final_images": 0
+    }
+    
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -153,10 +165,10 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
             )
             page = context.new_page()
             try:
-                page.goto(target_url, wait_until="domcontentloaded", timeout=7000)
-            except Exception:
-                pass
-            page.wait_for_timeout(600)
+                page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
+            except Exception as e:
+                print(f"[playwright] Navigation notice: {e}")
+            page.wait_for_timeout(800)
 
             def extract_batch():
                 added = 0
@@ -172,32 +184,50 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                     return urls;
                 }""")
                 for u in dom_urls:
+                    metrics["raw_candidates"] += 1
+                    metrics["dom_img_urls"] += 1
                     clean_u = u.replace("\\/", "/")
-                    if clean_u not in seen and clean_u.startswith("http"):
-                        seen.add(clean_u)
-                        collected_urls.append(clean_u)
-                        added += 1
+                    if not clean_u.startswith("http"):
+                        metrics["rejected_invalid"] += 1
+                        continue
+                    if clean_u in seen:
+                        metrics["duplicates_removed"] += 1
+                        continue
+                    seen.add(clean_u)
+                    collected_urls.append(clean_u)
+                    added += 1
 
                 html = page.content()
                 decoded = unescape(html)
                 for m in ORIGURL_RE.finditer(decoded):
+                    metrics["raw_candidates"] += 1
+                    metrics["json_orig_urls"] += 1
                     u = m.group(1).replace("\\/", "/")
-                    if u not in seen and u.startswith("http"):
-                        seen.add(u)
-                        collected_urls.append(u)
-                        added += 1
+                    if not u.startswith("http"):
+                        metrics["rejected_invalid"] += 1
+                        continue
+                    if u in seen:
+                        metrics["duplicates_removed"] += 1
+                        continue
+                    seen.add(u)
+                    collected_urls.append(u)
+                    added += 1
 
                 for m in CDN_RE.finditer(decoded):
+                    metrics["raw_candidates"] += 1
                     raw = m.group(0).split("?")[0]
                     parts = raw.split("/")
                     if len(parts) >= 5:
                         if parts[-1] not in ("orig", "original"):
                             parts[-1] = "orig"
                         upgraded = "/".join(parts)
-                        if upgraded not in seen:
-                            seen.add(upgraded)
-                            collected_urls.append(upgraded)
-                            added += 1
+                        metrics["cdn_upgraded_urls"] += 1
+                        if upgraded in seen:
+                            metrics["duplicates_removed"] += 1
+                            continue
+                        seen.add(upgraded)
+                        collected_urls.append(upgraded)
+                        added += 1
 
                 return added
 
@@ -206,22 +236,38 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
 
             if deep:
                 t_scroll_start = time.time()
-                while time.time() - t_scroll_start < 12.0 and len(collected_urls) < max_images:
-                    page.evaluate("window.scrollBy(0, 15000)")
-                    page.wait_for_timeout(200)
+                max_scroll_time = 35.0
+                consecutive_idle = 0
+                scroll_count = 0
+                
+                while time.time() - t_scroll_start < max_scroll_time and len(collected_urls) < max_images:
+                    scroll_count += 1
+                    page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(450)
 
                     # Click "show more" button if visible
                     page.evaluate("""() => {
-                        const btn = document.querySelector('.more__button, .button_theme_action, .more__btn, [data-bem*="more"]');
+                        const btn = document.querySelector('.more__button, .button_theme_action, .more__btn, [data-bem*="more"], .FetchList-MoreButton, .Button2_view_action');
                         if (btn && btn.offsetParent !== null) { btn.click(); }
                     }""")
 
                     added = extract_batch()
-                    if added == 0 and time.time() - t_scroll_start > 5.0:
-                        break
+                    if added == 0:
+                        consecutive_idle += 1
+                        page.wait_for_timeout(350)
+                        added = extract_batch()
+                        if added > 0:
+                            consecutive_idle = 0
+                        elif consecutive_idle >= 4:
+                            print(f"[playwright] End of SERP reached ({consecutive_idle} consecutive idle cycles at scroll {scroll_count})")
+                            break
+                    else:
+                        consecutive_idle = 0
 
             browser.close()
-            print(f"[playwright] Successfully extracted {len(collected_urls)} unique high-res images via Playwright")
+            metrics["final_images"] = len(collected_urls[:max_images])
+            print(f"[playwright] Pipeline report: raw={metrics['raw_candidates']}, dom={metrics['dom_img_urls']}, origUrl={metrics['json_orig_urls']}, cdn={metrics['cdn_upgraded_urls']}, dups_removed={metrics['duplicates_removed']}, final={metrics['final_images']}")
+            print(f"[playwright] Successfully extracted {len(collected_urls[:max_images])} unique high-res images via Playwright")
     except Exception as e:
         print(f"[playwright] Error during rendering: {e}")
     return collected_urls[:max_images]
@@ -276,13 +322,13 @@ def index():
     return jsonify({
         "status": "online",
         "service": "Image Scraper Pro Cloud Backend",
-        "version": "2.3-pinterest-resource-api"
+        "version": "2.4-yandex-fix-pinterest-relevance"
     }), 200
 
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "version": "2.3-pinterest-resource-api"})
+    return jsonify({"status": "ok", "version": "2.4-yandex-fix-pinterest-relevance"})
 
 
 @app.route("/api/pinterest/extract", methods=["POST", "OPTIONS"])
