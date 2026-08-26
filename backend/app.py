@@ -1,16 +1,10 @@
-"""
-Fast Yandex Image Scraper Backend
-- No Playwright/browser needed
-- Scrapes via requests from your real IP (no captcha)
-- 30 images/page × 34 pages = 1000+ images in parallel
-- Run: python app.py
-"""
+import uuid
 import re
 import io
 import zipfile
 import concurrent.futures
 from html import unescape
-from urllib.parse import urlparse, urlencode, parse_qs
+from urllib.parse import urlparse, urlencode, parse_qs, unquote
 
 import requests
 import os
@@ -47,6 +41,25 @@ SESSION.headers.update(HEADERS)
 import threading
 import time
 
+# In-memory background jobs registry for progressive streaming
+SCRAPE_JOBS = {}
+SCRAPE_JOBS_LOCK = threading.Lock()
+
+def start_job_cleanup_loop():
+    """Periodically removes jobs older than 20 minutes to prevent memory leaks."""
+    def cleanup():
+        while True:
+            time.sleep(300)
+            now = time.time()
+            with SCRAPE_JOBS_LOCK:
+                expired = [jid for jid, j in SCRAPE_JOBS.items() if now - j.get("started_at", now) > 1200]
+                for jid in expired:
+                    del SCRAPE_JOBS[jid]
+    t = threading.Thread(target=cleanup, daemon=True)
+    t.start()
+
+start_job_cleanup_loop()
+
 def start_keep_alive():
     """Background thread that pings Render health endpoint every 4 minutes to prevent sleep."""
     def ping_loop():
@@ -81,6 +94,29 @@ IMGURL_PARAM_RE = re.compile(r'img_url=([^&"\'<>\s]+)')
 CDN_RE     = re.compile(r'https://avatars\.mds\.yandex\.net/[^\s"\'<>\\,\)]+')
 
 
+def canonicalize_yandex_url(url: str) -> str:
+    """Normalizes Yandex image URLs, upgrades CDN thumbnails to full-res /orig, and strips tracking params."""
+    if not url:
+        return ""
+    clean = url.replace("\\/", "/").strip()
+    if "avatars.mds.yandex.net" in clean:
+        raw = clean.split("?")[0]
+        parts = raw.split("/")
+        if len(parts) >= 5:
+            if parts[-1] not in ("orig", "original"):
+                parts[-1] = "orig"
+            return "/".join(parts)
+        return raw
+    if "?" in clean:
+        base, query = clean.split("?", 1)
+        params = parse_qs(query)
+        filtered_params = {k: v for k, v in params.items() if k not in ("nii", "pos", "rpt", "lr", "cst", "redircnt")}
+        if filtered_params:
+            return f"{base}?{urlencode(filtered_params, doseq=True)}"
+        return base
+    return clean
+
+
 def extract_orig_urls(html: str) -> list:
     """Extract original image URLs from Yandex HTML (entity-decoded)."""
     if not html:
@@ -92,7 +128,7 @@ def extract_orig_urls(html: str) -> list:
 
     # Primary: origUrl fields
     for m in ORIGURL_RE.finditer(decoded):
-        url = m.group(1).replace("\\/", "/")
+        url = canonicalize_yandex_url(m.group(1))
         if url not in seen and url.startswith("http"):
             seen.add(url)
             results.append(url)
@@ -101,25 +137,19 @@ def extract_orig_urls(html: str) -> list:
     for m in IMGURL_PARAM_RE.finditer(decoded):
         raw_u = m.group(1)
         try:
-            url = unquote(raw_u).replace("\\/", "/")
+            url = canonicalize_yandex_url(unquote(raw_u))
             if url not in seen and url.startswith("http"):
                 seen.add(url)
                 results.append(url)
         except Exception:
             pass
 
-    # Fallback: Yandex CDN thumbnails → upgrade to /orig
-    if len(results) < 5:
-        for m in CDN_RE.finditer(decoded):
-            raw = m.group(0).split("?")[0]
-            parts = raw.split("/")
-            if len(parts) >= 5:
-                if parts[-1] not in ("orig", "original"):
-                    parts[-1] = "orig"
-                upgraded = "/".join(parts)
-                if upgraded not in seen:
-                    seen.add(upgraded)
-                    results.append(upgraded)
+    # Tertiary: Yandex CDN thumbnails → upgrade to /orig
+    for m in CDN_RE.finditer(decoded):
+        upgraded = canonicalize_yandex_url(m.group(0))
+        if upgraded not in seen and upgraded.startswith("http"):
+            seen.add(upgraded)
+            results.append(upgraded)
 
     return results
 
@@ -130,7 +160,7 @@ def build_yandex_url(domain: str, text: str, page: int, extra: dict) -> str:
     return f"https://{domain}/images/search?{urlencode(params)}"
 
 
-def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool = True) -> list:
+def scrape_yandex_playwright(target_url: str, max_images: int = 2000, deep: bool = True) -> list:
     """Headless Chromium Playwright scraper for deep Yandex SERP extraction up to max_images."""
     from playwright.sync_api import sync_playwright
     print(f"[playwright] Launching Chromium browser for: {target_url[:80]} (target={max_images}, deep={deep})...")
@@ -186,7 +216,7 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 for u in dom_urls:
                     metrics["raw_candidates"] += 1
                     metrics["dom_img_urls"] += 1
-                    clean_u = u.replace("\\/", "/")
+                    clean_u = canonicalize_yandex_url(u)
                     if not clean_u.startswith("http"):
                         metrics["rejected_invalid"] += 1
                         continue
@@ -202,7 +232,7 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 for m in ORIGURL_RE.finditer(decoded):
                     metrics["raw_candidates"] += 1
                     metrics["json_orig_urls"] += 1
-                    u = m.group(1).replace("\\/", "/")
+                    u = canonicalize_yandex_url(m.group(1))
                     if not u.startswith("http"):
                         metrics["rejected_invalid"] += 1
                         continue
@@ -215,19 +245,14 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
 
                 for m in CDN_RE.finditer(decoded):
                     metrics["raw_candidates"] += 1
-                    raw = m.group(0).split("?")[0]
-                    parts = raw.split("/")
-                    if len(parts) >= 5:
-                        if parts[-1] not in ("orig", "original"):
-                            parts[-1] = "orig"
-                        upgraded = "/".join(parts)
-                        metrics["cdn_upgraded_urls"] += 1
-                        if upgraded in seen:
-                            metrics["duplicates_removed"] += 1
-                            continue
-                        seen.add(upgraded)
-                        collected_urls.append(upgraded)
-                        added += 1
+                    upgraded = canonicalize_yandex_url(m.group(0))
+                    metrics["cdn_upgraded_urls"] += 1
+                    if upgraded in seen:
+                        metrics["duplicates_removed"] += 1
+                        continue
+                    seen.add(upgraded)
+                    collected_urls.append(upgraded)
+                    added += 1
 
                 return added
 
@@ -242,7 +267,7 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
                 
                 while time.time() - t_scroll_start < max_scroll_time and len(collected_urls) < max_images:
                     scroll_count += 1
-                    page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(450)
 
                     # Click "show more" button if visible
@@ -273,8 +298,85 @@ def scrape_yandex_playwright(target_url: str, max_images: int = 1000, deep: bool
     return collected_urls[:max_images]
 
 
-def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34, deep=True, max_images=1000) -> list:
-    """Scrape up to max_images using deep Playwright progressive scrolling + multi-page pagination to guarantee 500+ images."""
+def _run_background_yandex_scrape(job_id: str, domain: str, text: str, extra: dict, target_count: int = 2000):
+    """Background worker that queries multiple Yandex SERP pages and expands results up to target_count."""
+    print(f"[job:{job_id}] Background scraper started for query '{text}' (target={target_count})")
+    consecutive_empty = 0
+    max_pages = 75
+    batch_size = 5
+
+    for batch_start in range(1, max_pages, batch_size):
+        with SCRAPE_JOBS_LOCK:
+            job = SCRAPE_JOBS.get(job_id)
+            if not job or job.get("status") == "aborted":
+                return
+            if len(job["images"]) >= target_count:
+                job["status"] = "completed"
+                job["stop_reason"] = "TARGET_REACHED"
+                job["updated_at"] = time.time()
+                return
+
+        page_indices = list(range(batch_start, min(batch_start + batch_size, max_pages)))
+        
+        def fetch_single_page(p_idx):
+            p_url = build_yandex_url(domain, text, p_idx, extra)
+            html = fetch_page(p_url, timeout=7)
+            return extract_orig_urls(html)
+
+        new_batch_urls = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            page_results = executor.map(fetch_single_page, page_indices)
+            for urls in page_results:
+                for u in urls:
+                    canon = canonicalize_yandex_url(u)
+                    if canon.startswith("http"):
+                        new_batch_urls.append(canon)
+
+        added_in_batch = 0
+        with SCRAPE_JOBS_LOCK:
+            job = SCRAPE_JOBS.get(job_id)
+            if not job:
+                return
+            for u in new_batch_urls:
+                if u not in job["seen_urls"]:
+                    job["seen_urls"].add(u)
+                    job["images"].append({
+                        "url": u,
+                        "thumb": u,
+                        "alt": text,
+                        "width": "Original",
+                        "height": "Original"
+                    })
+                    job["count"] = len(job["images"])
+                    job["updated_at"] = time.time()
+                    added_in_batch += 1
+                    if len(job["images"]) >= target_count:
+                        job["status"] = "completed"
+                        job["stop_reason"] = "TARGET_REACHED"
+                        print(f"[job:{job_id}] Target reached: {len(job['images'])} images")
+                        return
+
+        if added_in_batch == 0:
+            consecutive_empty += 1
+            if consecutive_empty >= 4:
+                print(f"[job:{job_id}] SERP genuinely exhausted at page {batch_start + batch_size}")
+                break
+        else:
+            consecutive_empty = 0
+
+        time.sleep(0.2)
+
+    with SCRAPE_JOBS_LOCK:
+        job = SCRAPE_JOBS.get(job_id)
+        if job and job["status"] != "completed":
+            job["status"] = "completed"
+            job["stop_reason"] = "ALL_PAGES_EXHAUSTED"
+            job["updated_at"] = time.time()
+            print(f"[job:{job_id}] Finished: collected {len(job['images'])} images")
+
+
+def scrape_yandex(domain: str, text: str, extra: dict, max_pages=60, deep=True, max_images=2000) -> list:
+    """Scrape up to max_images using multi-page pagination + deep extraction."""
     first_url = build_yandex_url(domain, text, 0, extra)
     seen = set()
     collected = []
@@ -282,7 +384,7 @@ def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34, deep=True, 
     def add_urls(urls):
         added = 0
         for u in urls:
-            clean_u = u.replace("\\/", "/").strip()
+            clean_u = canonicalize_yandex_url(u)
             if clean_u.startswith("http") and clean_u not in seen:
                 seen.add(clean_u)
                 collected.append(clean_u)
@@ -290,33 +392,32 @@ def scrape_yandex(domain: str, text: str, extra: dict, max_pages=34, deep=True, 
         return added
 
     if deep:
-        # Step 1: Deep Playwright progressive scrolling on main SERP
-        try:
-            pw_urls = scrape_yandex_playwright(first_url, max_images=max_images, deep=True)
-            add_urls(pw_urls)
-            print(f"[scrape_yandex] Playwright gathered {len(collected)} images")
-        except Exception as e:
-            print(f"[scrape_yandex] Playwright pass notice: {e}")
+        # Step 1: Initial page 0 extract
+        p0_html = fetch_page(first_url, timeout=6)
+        p0_urls = extract_orig_urls(p0_html)
+        add_urls(p0_urls)
 
-        # Step 2: Multi-page parallel pagination if below target
-        target_count = min(max_images, 500)
+        # Step 2: Multi-page parallel pagination up to max_images (2000)
+        target_count = max_images
         if len(collected) < target_count:
-            print(f"[scrape_yandex] Current count ({len(collected)}) < {target_count}. Expanding across multi-page SERP...")
-            page_indices = list(range(0, min(max_pages, 28)))
+            page_indices = list(range(1, min(max_pages, 65)))
             
             def fetch_and_extract(p_idx):
                 p_url = build_yandex_url(domain, text, p_idx, extra)
                 html = fetch_page(p_url, timeout=7)
                 return extract_orig_urls(html)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
                 results = executor.map(fetch_and_extract, page_indices)
                 for res_urls in results:
                     add_urls(res_urls)
-                    if len(collected) >= max_images:
+                    if len(collected) >= target_count:
                         break
 
-            print(f"[scrape_yandex] Total images after multi-page expansion: {len(collected)}")
+        # Fallback to Playwright if initial requests were blocked
+        if len(collected) < 30:
+            pw_urls = scrape_yandex_playwright(first_url, max_images=max_images, deep=True)
+            add_urls(pw_urls)
 
         return collected[:max_images]
 
@@ -364,13 +465,108 @@ def index():
     return jsonify({
         "status": "online",
         "service": "Image Scraper Pro Cloud Backend",
-        "version": "2.5-yandex-500-guaranteed"
+        "version": "2.6-yandex-2000-progressive"
     }), 200
 
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "version": "2.5-yandex-500-guaranteed"})
+    return jsonify({"status": "ok", "version": "2.6-yandex-2000-progressive"})
+
+
+@app.route("/api/scrape/start", methods=["POST", "OPTIONS"])
+def api_scrape_start():
+    """Starts a progressive Yandex scraping session: immediately returns Batch 1 and continues in background up to 2000 images."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    data = request.json or {}
+    try:
+        domain, text, extra = parse_yandex_request(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    target_count = min(int(data.get("max_images", 2000)), 2000)
+    job_id = str(uuid.uuid4())[:8]
+
+    # Fast initial extract for instant 0-3s results
+    first_url = build_yandex_url(domain, text, 0, extra)
+    page0_html = fetch_page(first_url, timeout=5)
+    page0_urls = extract_orig_urls(page0_html)
+    
+    initial_images = []
+    seen = set()
+    for u in page0_urls:
+        canon = canonicalize_yandex_url(u)
+        if canon.startswith("http") and canon not in seen:
+            seen.add(canon)
+            initial_images.append({
+                "url": canon,
+                "thumb": canon,
+                "alt": text,
+                "width": "Original",
+                "height": "Original"
+            })
+
+    with SCRAPE_JOBS_LOCK:
+        SCRAPE_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "scraping" if len(initial_images) < target_count else "completed",
+            "images": list(initial_images),
+            "seen_urls": set(seen),
+            "count": len(initial_images),
+            "target": target_count,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "stop_reason": None
+        }
+
+    # Start background expansion thread
+    if len(initial_images) < target_count:
+        t = threading.Thread(
+            target=_run_background_yandex_scrape,
+            args=(job_id, domain, text, extra, target_count),
+            daemon=True
+        )
+        t.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "scraping" if len(initial_images) < target_count else "completed",
+        "count": len(initial_images),
+        "target": target_count,
+        "initial_images": initial_images
+    }), 200
+
+
+@app.route("/api/scrape/poll", methods=["GET", "OPTIONS"])
+def api_scrape_poll():
+    """Polls newly collected image batches from an active scraping job."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    job_id = request.args.get("job_id")
+    offset = int(request.args.get("offset", 0))
+
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+
+    with SCRAPE_JOBS_LOCK:
+        job = SCRAPE_JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found or expired", "status": "expired"}), 404
+
+        all_images = job["images"]
+        new_images = all_images[offset:]
+        return jsonify({
+            "job_id": job_id,
+            "status": job["status"],
+            "count": job["count"],
+            "target": job["target"],
+            "stop_reason": job.get("stop_reason"),
+            "new_images": new_images,
+            "next_offset": len(all_images)
+        }), 200
 
 
 @app.route("/api/pinterest/extract", methods=["POST", "OPTIONS"])

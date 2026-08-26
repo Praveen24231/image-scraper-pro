@@ -291,6 +291,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================================================
     // SCRAPE — requires local Python backend (Yandex blocks all cloud scrapers)
     // ==========================================================================
+    // ==========================================================================
+    // SCRAPE — Progressive Live Streaming Engine (Up to 2,000 Images)
+    // ==========================================================================
     scrapeBtn.addEventListener('click', async () => {
         const url = urlInput.value.trim();
         if (!url) {
@@ -313,21 +316,115 @@ document.addEventListener('DOMContentLoaded', () => {
         countPanel.classList.add('hidden');
 
         const deepMode = autoscrollToggle.checked;
-        loaderMsg.textContent = '⚡ Connecting to cloud server (extracting images)…';
+        const targetCount = deepMode ? 2000 : 30;
+        loaderMsg.textContent = '⚡ Connecting to server (extracting initial images)…';
 
+        let activeBackend = BACKEND_URL;
+        let jobData = null;
+
+        const endpointsToTry = [
+            `${BACKEND_URL}/api/scrape/start`,
+            `${RENDER_API}/api/scrape/start`,
+            `${LOCAL_API}/api/scrape/start`
+        ];
+
+        for (const ep of [...new Set(endpointsToTry)]) {
+            try {
+                const res = await fetch(ep, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
+                    signal: AbortSignal.timeout(12000)
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.job_id) {
+                        jobData = data;
+                        activeBackend = ep.replace('/api/scrape/start', '');
+                        BACKEND_URL = activeBackend;
+                        localAvailable = true;
+                        updateStatusBadge();
+                        break;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // ── Progressive Engine Mode (Fast 0-3s first results + live streaming) ──
+        if (jobData && jobData.job_id) {
+            allImages = [...(jobData.initial_images || [])];
+            filteredImages = [...allImages];
+
+            loader.classList.add('hidden');
+            resultsSection.classList.remove('hidden');
+            displayImages(allImages);
+
+            imageCount.textContent = deepMode && jobData.status === 'scraping'
+                ? `Found ${allImages.length} images (collecting up to ${jobData.target}…)`
+                : `Found ${allImages.length} images`;
+
+            if (jobData.status === 'scraping' && deepMode) {
+                showToast(`⚡ Initial batch loaded (${allImages.length} images). Continuing in background…`, 'info', 2500);
+
+                let offset = allImages.length;
+                let consecutiveNoNew = 0;
+                const pollInterval = 1200;
+
+                while (allImages.length < targetCount) {
+                    await new Promise(r => setTimeout(r, pollInterval));
+                    try {
+                        const pollRes = await fetch(`${activeBackend}/api/scrape/poll?job_id=${jobData.job_id}&offset=${offset}`, {
+                            signal: AbortSignal.timeout(10000)
+                        });
+                        if (pollRes.ok) {
+                            const pollData = await pollRes.json();
+                            const newBatch = pollData.new_images || [];
+                            if (newBatch.length > 0) {
+                                const startIdx = allImages.length;
+                                allImages.push(...newBatch);
+                                filteredImages = [...allImages];
+                                appendCardsToGrid(newBatch, startIdx);
+                                offset = pollData.next_offset || allImages.length;
+                                imageCount.textContent = pollData.status === 'completed'
+                                    ? `Found ${allImages.length} images`
+                                    : `Found ${allImages.length} images (collecting up to ${targetCount}…)`;
+                                consecutiveNoNew = 0;
+                            } else {
+                                consecutiveNoNew++;
+                            }
+
+                            if (pollData.status === 'completed' || allImages.length >= targetCount || consecutiveNoNew >= 8) {
+                                break;
+                            }
+                        }
+                    } catch (pe) {
+                        consecutiveNoNew++;
+                        if (consecutiveNoNew >= 6) break;
+                    }
+                }
+
+                imageCount.textContent = `Found ${allImages.length} images`;
+                showToast(`✅ Completed! Extracted ${allImages.length} high-res images.`, 'success');
+            } else {
+                showToast(`Found ${allImages.length} images!`, 'success');
+            }
+            lucide.createIcons();
+            return;
+        }
+
+        // ── Single-Shot Fallback Mode ──
         let extracted = [];
-        const endpoints = [
+        const fallbackEndpoints = [
             `${BACKEND_URL}/api/scrape`,
             `${LOCAL_API}/api/scrape`,
             `/api/scrape`,
             `${RENDER_API}/api/scrape`
         ];
-        const uniqueEndpoints = [...new Set(endpoints)];
+        const uniqueEndpoints = [...new Set(fallbackEndpoints)];
 
-        // Retry loop: try up to 3 times to handle Render cold-start wakeups gracefully
         for (let attempt = 1; attempt <= 3; attempt++) {
             if (attempt > 1) {
-                loaderMsg.textContent = `⚡ Cloud server waking up, retrying extraction (attempt ${attempt}/3)…`;
+                loaderMsg.textContent = `⚡ Server waking up, retrying extraction (attempt ${attempt}/3)…`;
                 await new Promise(r => setTimeout(r, 3000));
             }
 
@@ -336,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const res = await fetch(endpoint, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url, autoscroll: deepMode, max_images: 1000 }),
+                        body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
                         signal: AbortSignal.timeout(45000)
                     });
                     if (res.ok) {
@@ -369,7 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: `The cloud server took too long to respond.<br><br>Please wait 5 seconds and click <strong>Extract Images</strong> again.`
             });
             imageCount.textContent = '0 images';
-            showToast('Cloud server waking up — please click Extract Images again', 'info');
+            showToast('Server waking up — please click Extract Images again', 'info');
         } else {
             filterSelect.value = 'all';
             applyFilter();
@@ -416,7 +513,7 @@ document.addEventListener('DOMContentLoaded', () => {
             countBreakdown.innerHTML = Object.entries(bd).map(([k, v]) =>
                 `<span class="count-chip"><strong>${v}</strong> ${k.toUpperCase()}</span>`
             ).join('') || '<span class="count-chip">No breakdown</span>';
-            countNote.textContent = 'Page 1 only. Enable Deep Scrape for 1000+ images.';
+            countNote.textContent = 'Page 1 only. Enable Deep Scrape for up to 2,000 images.';
             showToast(`${total} images on page 1`, 'success');
         } catch (err) {
             countPanel.classList.remove('hidden');
@@ -491,19 +588,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================================================
-    // DISPLAY
+    // DISPLAY & PROGRESSIVE APPENDING
     // ==========================================================================
-    function displayImages(images) {
-        imageGrid.innerHTML = '';
-        if (!images.length) {
-            imageGrid.innerHTML = `<p style="color:var(--text-dim);grid-column:1/-1;text-align:center;padding:3rem;font-weight:600;">No images match this filter.</p>`;
-            return;
-        }
+    function appendCardsToGrid(images, startIndex) {
+        if (!images.length) return;
         const frag = document.createDocumentFragment();
         images.forEach((img, idx) => {
+            const actualIdx = startIndex + idx;
             const card = document.createElement('div');
             card.className = `img-card ${selectedUrls.has(img.url) ? 'selected' : ''}`;
-            card.dataset.index = idx;
+            card.dataset.index = actualIdx;
             const safeAlt = (img.alt || 'Image').replace(/"/g, '&quot;');
             card.innerHTML = `
                 <div class="card-select-checkbox" title="Select"><i data-lucide="check"></i></div>
@@ -517,7 +611,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>`;
             card.addEventListener('click', e => {
-                if (e.target.closest('.btn-preview')) { e.stopPropagation(); openLightbox(idx); return; }
+                if (e.target.closest('.btn-preview')) { e.stopPropagation(); openLightbox(actualIdx); return; }
                 e.preventDefault();
                 if (selectedUrls.has(img.url)) { selectedUrls.delete(img.url); card.classList.remove('selected'); }
                 else { selectedUrls.add(img.url); card.classList.add('selected'); }
@@ -527,6 +621,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         imageGrid.appendChild(frag);
         lucide.createIcons();
+    }
+
+    function displayImages(images) {
+        imageGrid.innerHTML = '';
+        if (!images.length) {
+            imageGrid.innerHTML = `<p style="color:var(--text-dim);grid-column:1/-1;text-align:center;padding:3rem;font-weight:600;">No images match this filter.</p>`;
+            return;
+        }
+        appendCardsToGrid(images, 0);
     }
 
     // ==========================================================================

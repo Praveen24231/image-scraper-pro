@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     const params = new URLSearchParams(u.search);
     const text = params.get('text') || params.get('query') || params.get('q') || 'wallpaper';
 
-    const pagesToScrape = autoscroll ? 25 : 1; // 25 pages in parallel = 500+ images on Vercel
+    const pagesToScrape = autoscroll ? 35 : 1; // 35 pages in parallel = 700+ images on Vercel
     const allUrls = [];
     const seen = new Set();
 
