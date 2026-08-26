@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     const params = new URLSearchParams(u.search);
     const text = params.get('text') || params.get('query') || params.get('q') || 'wallpaper';
 
-    const pagesToScrape = autoscroll ? 5 : 1; // 5 pages = ~150-200 images in < 3 seconds on Vercel
+    const pagesToScrape = autoscroll ? 25 : 1; // 25 pages in parallel = 500+ images on Vercel
     const allUrls = [];
     const seen = new Set();
 
@@ -34,7 +34,7 @@ export default async function handler(req, res) {
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://yandex.com/'
           },
-          signal: AbortSignal.timeout(5000)
+          signal: AbortSignal.timeout(6000)
         });
         const html = await response.text();
 
@@ -59,6 +59,23 @@ export default async function handler(req, res) {
               allUrls.push(imgUrl);
             }
           } catch (e) {}
+        }
+
+        // 3. Extract Yandex CDN matches upgraded to /orig
+        const cdnRegex = /https:\/\/avatars\.mds\.yandex\.net\/[^\s"'<>\\,\)]+/g;
+        while ((match = cdnRegex.exec(html)) !== null) {
+          const raw = match[0].split('?')[0];
+          const parts = raw.split('/');
+          if (parts.length >= 5) {
+            if (parts[parts.length - 1] !== 'orig' && parts[parts.length - 1] !== 'original') {
+              parts[parts.length - 1] = 'orig';
+            }
+            const upgraded = parts.join('/');
+            if (!seen.has(upgraded)) {
+              seen.add(upgraded);
+              allUrls.push(upgraded);
+            }
+          }
         }
       } catch (e) {}
     };

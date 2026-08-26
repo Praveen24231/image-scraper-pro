@@ -336,7 +336,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const res = await fetch(endpoint, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url, autoscroll: deepMode }),
+                        body: JSON.stringify({ url, autoscroll: deepMode, max_images: 1000 }),
                         signal: AbortSignal.timeout(45000)
                     });
                     if (res.ok) {
