@@ -1,0 +1,133 @@
+{
+  "form": {
+    "action": "/images/search",
+    "searchLabel": "Search",
+    "hiddenInputs": [],
+    "logo": {
+      "href": "//yandex.com",
+      "isForeign": true,
+      "size": 44
+    },
+    "placeholder": "Find an image"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "id": "search",
+        "label": "Web",
+        "url": "//yandex.com/search",
+        "params": {
+          "text": "[$query]",
+          "site": "[$site]",
+          "source": "tabbar"
+        }
+      },
+      {
+        "id": "search_neuro",
+        "label": "Yandex AI",
+        "url": "//yandex.com/search",
+        "params": {
+          "text": "[$query]",
+          "source": "tabbar",
+          "promo": "force_neuro"
+        },
+        "target": "_self"
+      },
+      {
+        "id": "images",
+        "label": "Images",
+        "url": "//yandex.com/images",
+        "params": {
+          "site": "[$site]",
+          "parent-reqid": "[$reqid]"
+        },
+        "target": "_self"
+      },
+      {
+        "id": "video",
+        "label": "Video",
+        "url": "//yandex.com/video/search",
+        "params": {
+          "text": "[$query]",
+          "site": "[$site]",
+          "noreask": "[$noreask]",
+          "parent-reqid": "[$reqid]",
+          "from": "tabbar"
+        }
+      },
+      {
+        "id": "maps",
+        "label": "Maps",
+        "url": "//yandex.com/maps/",
+        "params": {
+          "text": "[$query]",
+          "source": "serp_navig"
+        }
+      },
+      {
+        "id": "translate",
+        "label": "Translate",
+        "url": "//translate.yandex.com",
+        "params": {
+          "text": "[$query]",
+          "from": "tabbar"
+        }
+      }
+    ],
+    "selectedTabId": "images",
+    "isMordaTabs": true,
+    "isNavTabRedesigned": false,
+    "isNavActiveTabRedesigned": false
+  },
+  "user": {
+    "ariaLabel": "\u041c\u0435\u043d\u044e",
+    "loggedIn": false,
+    "userIDProps": {
+      "lang": "en",
+      "flag": "skin",
+      "project": "images",
+      "queryParams": {
+        "utm_source": "images"
+      },
+      "theme": "system",
+      "host": "yandex.com"
+    },
+    "loginUrl": "https://passport.yandex.com/auth?origin=images_head_auth&login%5B%5D=",
+    "clearLoginUrl": "https://passport.yandex.com/auth?origin=images_head_auth&login%5B%5D=",
+    "loginText": "Log in"
+  },
+  "actions": {
+    "hasCbir": true
+  },
+  "context": {
+    "query": "high resolution wallpaper",
+    "reqid": "1777410441681922-12537555993283116749-balancer-l7leveler-kubr-yp-sas-82-BAL",
+    "lr": "21006",
+    "service": "images",
+    "page": "search",
+    "aliceDeeplink": "{\"text\":\"high resolution wallpaper\"}",
+    "counters": {
+      "type": "w",
+      "data": {
+        "login": "175.290.290",
+        "register": "175.290.727",
+        "logo": "8.228.175.179",
+        "tab-search": "8.228.208.153",
+        "tab-search_neuro": "8.228.208.",
+        "tab-images": "8.228.208.277",
+        "tab-video": "8.228.208.231",
+        "tab-maps": "8.228.208.23",
+        "tab-translate": "8.228.208.575"
+      }
+    }
+  },
+  "embedded": false,
+  "loggedIn": false,
+  "mix": {
+    "outerContainer": [
+      "HeaderDesktop_tr"
+    ]
+  },
+  "isCbirNeuroFlagEnabled": false,
+  "isInitialActiveNeuroSubmit": false
+}
