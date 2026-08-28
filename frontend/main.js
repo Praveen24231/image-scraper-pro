@@ -289,12 +289,66 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================================================
-    // SCRAPE — requires local Python backend (Yandex blocks all cloud scrapers)
+    // SCRAPING & STREAMING STATE
     // ==========================================================================
-    // ==========================================================================
-    // SCRAPE — Progressive Live Streaming Engine (Up to 2,000 Images)
-    // ==========================================================================
+    let isScrapingActive = false;
+    let activeJobId = null;
+    let activePollTimer = null;
+    let scrapeAbortCtrl = null;
+
+    function setScrapingUI(active) {
+        isScrapingActive = active;
+        if (active) {
+            scrapeBtn.classList.add('btn-scraping-active');
+            scrapeBtn.innerHTML = '<span class="btn-text">Stop Scraping</span><i data-lucide="square"></i>';
+        } else {
+            scrapeBtn.classList.remove('btn-scraping-active');
+            scrapeBtn.innerHTML = '<span class="btn-text">Extract Images</span><i data-lucide="zap"></i>';
+        }
+        lucide.createIcons();
+    }
+
+    async function stopActiveScraping() {
+        if (!isScrapingActive) return;
+        if (activePollTimer) {
+            clearInterval(activePollTimer);
+            activePollTimer = null;
+        }
+        if (scrapeAbortCtrl) {
+            scrapeAbortCtrl.abort();
+            scrapeAbortCtrl = null;
+        }
+        if (activeJobId) {
+            const jid = activeJobId;
+            activeJobId = null;
+            try {
+                await fetch(`${BACKEND_URL}/api/scrape/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: jid }),
+                    signal: AbortSignal.timeout(4000)
+                });
+            } catch(e) {}
+        }
+        setScrapingUI(false);
+        loader.classList.add('hidden');
+        resultsSection.classList.remove('hidden');
+        if (filterSelect.value === 'all') {
+            filteredImages = [...allImages];
+        } else {
+            applyFilter();
+        }
+        imageCount.textContent = `Found ${allImages.length} images (Stopped)`;
+        showToast(`Scraping stopped. Displaying ${allImages.length} collected image(s).`, 'info');
+        lucide.createIcons();
+    }
+
     scrapeBtn.addEventListener('click', async () => {
+        if (isScrapingActive) {
+            await stopActiveScraping();
+            return;
+        }
+
         const url = urlInput.value.trim();
         if (!url) {
             urlInput.focus();
@@ -307,169 +361,158 @@ document.addEventListener('DOMContentLoaded', () => {
             return extractPinterest(url);
         }
 
-        resultsSection.classList.add('hidden');
+        const deepMode = autoscrollToggle.checked;
+        const targetCount = deepMode ? 2000 : 30;
+
+        resultsSection.classList.remove('hidden');
         loader.classList.remove('hidden');
         imageGrid.innerHTML = '';
         allImages = []; filteredImages = [];
         selectedUrls.clear();
         updateSelectionUI();
         countPanel.classList.add('hidden');
+        imageCount.textContent = 'Initializing scraper...';
 
-        const deepMode = autoscrollToggle.checked;
-        const targetCount = deepMode ? 2000 : 30;
-        loaderMsg.textContent = '⚡ Connecting to server (extracting initial images)…';
+        loaderMsg.textContent = deepMode 
+            ? '⚡ Scraping Yandex... Streaming up to 2,000 images in real time'
+            : '⚡ Scraping Yandex... Please wait';
 
-        let activeBackend = BACKEND_URL;
-        let jobData = null;
+        setScrapingUI(true);
+        await checkLocalBackend();
 
-        const endpointsToTry = [
-            `${BACKEND_URL}/api/scrape/start`,
-            `${RENDER_API}/api/scrape/start`,
-            `${LOCAL_API}/api/scrape/start`
-        ];
-
-        for (const ep of [...new Set(endpointsToTry)]) {
-            try {
-                const res = await fetch(ep, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
-                    signal: AbortSignal.timeout(12000)
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.job_id) {
-                        jobData = data;
-                        activeBackend = ep.replace('/api/scrape/start', '');
-                        BACKEND_URL = activeBackend;
-                        localAvailable = true;
-                        updateStatusBadge();
-                        break;
-                    }
+        // ── Stream Mode via /api/scrape/start & /api/scrape/status ──
+        let started = false;
+        try {
+            const startRes = await fetch(`${BACKEND_URL}/api/scrape/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
+                signal: AbortSignal.timeout(10000)
+            });
+            if (startRes.ok) {
+                const startData = await startRes.json();
+                if (startData.job_id) {
+                    activeJobId = startData.job_id;
+                    started = true;
                 }
-            } catch (e) {}
+            }
+        } catch (e) {
+            console.warn('[stream] Start job attempt failed, falling back to direct scrape:', e);
         }
 
-        // ── Progressive Engine Mode (Fast 0-3s first results + live streaming) ──
-        if (jobData && jobData.job_id) {
-            allImages = [...(jobData.initial_images || [])];
-            filteredImages = [...allImages];
-
-            loader.classList.add('hidden');
-            resultsSection.classList.remove('hidden');
-            displayImages(allImages);
-
-            imageCount.textContent = deepMode && jobData.status === 'scraping'
-                ? `Found ${allImages.length} images (collecting up to ${jobData.target}…)`
-                : `Found ${allImages.length} images`;
-
-            if (jobData.status === 'scraping' && deepMode) {
-                showToast(`⚡ Initial batch loaded (${allImages.length} images). Continuing in background…`, 'info', 2500);
-
-                let offset = allImages.length;
-                let consecutiveNoNew = 0;
-                const pollInterval = 1200;
-
-                while (allImages.length < targetCount) {
-                    await new Promise(r => setTimeout(r, pollInterval));
-                    try {
-                        const pollRes = await fetch(`${activeBackend}/api/scrape/poll?job_id=${jobData.job_id}&offset=${offset}`, {
-                            signal: AbortSignal.timeout(10000)
-                        });
-                        if (pollRes.ok) {
-                            const pollData = await pollRes.json();
-                            const newBatch = pollData.new_images || [];
-                            if (newBatch.length > 0) {
-                                const startIdx = allImages.length;
-                                allImages.push(...newBatch);
-                                filteredImages = [...allImages];
-                                appendCardsToGrid(newBatch, startIdx);
-                                offset = pollData.next_offset || allImages.length;
-                                imageCount.textContent = pollData.status === 'completed'
-                                    ? `Found ${allImages.length} images`
-                                    : `Found ${allImages.length} images (collecting up to ${targetCount}…)`;
-                                consecutiveNoNew = 0;
-                            } else {
-                                consecutiveNoNew++;
-                            }
-
-                            if (pollData.status === 'completed' || allImages.length >= targetCount || consecutiveNoNew >= 8) {
-                                break;
-                            }
-                        }
-                    } catch (pe) {
-                        consecutiveNoNew++;
-                        if (consecutiveNoNew >= 6) break;
-                    }
+        if (started && activeJobId) {
+            let offset = 0;
+            activePollTimer = setInterval(async () => {
+                if (!isScrapingActive || !activeJobId) {
+                    clearInterval(activePollTimer);
+                    activePollTimer = null;
+                    return;
                 }
+                try {
+                    const stRes = await fetch(`${BACKEND_URL}/api/scrape/status?job_id=${activeJobId}&since=${offset}`, {
+                        signal: AbortSignal.timeout(6000)
+                    });
+                    if (stRes.ok) {
+                        const stData = await stRes.json();
+                        if (stData.images && stData.images.length > 0) {
+                            const newImgs = stData.images;
+                            const prevLen = allImages.length;
+                            allImages.push(...newImgs);
+                            offset = allImages.length;
+                            if (filterSelect.value === 'all') {
+                                filteredImages = [...allImages];
+                            }
+                            
+                            // Immediately append cards without rebuilding entire DOM
+                            appendCardsToGrid(newImgs, prevLen);
+                            loader.classList.add('hidden');
+                        }
 
-                imageCount.textContent = `Found ${allImages.length} images`;
-                showToast(`✅ Completed! Extracted ${allImages.length} high-res images.`, 'success');
-            } else {
-                showToast(`Found ${allImages.length} images!`, 'success');
-            }
-            lucide.createIcons();
+                        const curCount = allImages.length;
+                        const pageNum = stData.page_processed || 1;
+                        if (stData.status === 'running') {
+                            imageCount.textContent = `Found ${curCount} images (Scraping page ${pageNum}...)`;
+                        }
+
+                        if (stData.status === 'completed' || stData.status === 'aborted') {
+                            clearInterval(activePollTimer);
+                            activePollTimer = null;
+                            setScrapingUI(false);
+                            loader.classList.add('hidden');
+                            imageCount.textContent = `Found ${allImages.length} images`;
+                            filteredImages = [...allImages];
+                            if (allImages.length > 0) {
+                                showToast(`Found ${allImages.length} unique images!`, 'success');
+                            } else {
+                                imageGrid.innerHTML = renderEmptyState({
+                                    icon: 'search-x',
+                                    title: 'No Images Found',
+                                    body: `Could not retrieve images from Yandex.<br><br>Please verify your search query and try again.`
+                                });
+                            }
+                            lucide.createIcons();
+                        }
+                    }
+                } catch (pe) {
+                    console.warn('[stream] Poll status warning:', pe);
+                }
+            }, 350);
             return;
         }
 
-        // ── Single-Shot Fallback Mode ──
+        // ── Direct Synchronous Fallback ──
+        scrapeAbortCtrl = new AbortController();
         let extracted = [];
-        const fallbackEndpoints = [
+        const endpoints = [
             `${BACKEND_URL}/api/scrape`,
             `${LOCAL_API}/api/scrape`,
-            `/api/scrape`,
-            `${RENDER_API}/api/scrape`
+            `/api/scrape`
         ];
-        const uniqueEndpoints = [...new Set(fallbackEndpoints)];
+        const uniqueEndpoints = [...new Set(endpoints)];
 
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            if (attempt > 1) {
-                loaderMsg.textContent = `⚡ Server waking up, retrying extraction (attempt ${attempt}/3)…`;
-                await new Promise(r => setTimeout(r, 3000));
-            }
-
-            for (const endpoint of uniqueEndpoints) {
-                try {
-                    const res = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
-                        signal: AbortSignal.timeout(45000)
-                    });
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data.images && data.images.length > 0) {
-                            extracted = data.images;
-                            if (endpoint.startsWith('http')) {
-                                BACKEND_URL = endpoint.replace('/api/scrape', '');
-                                localAvailable = true;
-                                updateStatusBadge();
-                            }
-                            break;
+        for (const endpoint of uniqueEndpoints) {
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
+                    signal: scrapeAbortCtrl.signal
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.images && data.images.length > 0) {
+                        extracted = data.images;
+                        if (endpoint.startsWith('http')) {
+                            BACKEND_URL = endpoint.replace('/api/scrape', '');
+                            localAvailable = true;
+                            updateStatusBadge();
                         }
+                        break;
                     }
-                } catch (e) {}
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') break;
             }
-
-            if (extracted.length > 0) break;
         }
 
-        allImages = extracted;
-
+        setScrapingUI(false);
         loader.classList.add('hidden');
         resultsSection.classList.remove('hidden');
+
+        allImages = extracted;
+        filteredImages = [...allImages];
 
         if (!allImages.length) {
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'search-x',
                 title: 'No Images Found',
-                body: `The cloud server took too long to respond.<br><br>Please wait 5 seconds and click <strong>Extract Images</strong> again.`
+                body: `Could not retrieve images from Yandex.<br><br>Please verify your search query and click <strong>Extract Images</strong> again.`
             });
             imageCount.textContent = '0 images';
-            showToast('Server waking up — please click Extract Images again', 'info');
+            showToast('No images found', 'error');
         } else {
-            filterSelect.value = 'all';
-            applyFilter();
+            imageCount.textContent = `Found ${allImages.length} images`;
+            displayImages(allImages);
             showToast(`Found ${allImages.length} images!`, 'success');
         }
         lucide.createIcons();
@@ -576,6 +619,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     selectAllBtn.addEventListener('click', () => {
+        if (!filteredImages.length && allImages.length) {
+            filteredImages = [...allImages];
+        }
         filteredImages.forEach(i => selectedUrls.add(i.url));
         updateSelectionUI();
         document.querySelectorAll('.img-card').forEach(c => c.classList.add('selected'));
@@ -710,7 +756,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Shared parallel worker runner (avoids function name collision)
-    function runParallel(targets, taskFn, concurrency = 6) {
+    function runParallel(targets, taskFn, concurrency = 32) {
         let pos = 0;
         const worker = async () => {
             while (pos < targets.length && !downloadAborted) {
@@ -771,11 +817,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // ── Mode 1: Backend bulk ZIP — only for ≤150 images (free tier 512MB RAM limit)
-        // For larger batches we go straight to in-browser JSZip which handles any size.
-        if (localAvailable && targets.length <= 150) {
-            showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
-            logEntry(`Requesting ZIP from local backend…`, 'success');
+        // ── Mode 1: Backend bulk ZIP — ultra-fast parallel multithreaded engine
+        if (localAvailable) {
+            showModal(`Building ZIP — ${targets.length} images`, 'Downloading in high-speed parallel mode…');
+            logEntry(`Requesting ZIP from high-speed backend (${targets.length} images)…`, 'success');
             progressBarFill.classList.add('indeterminate');
 
             try {

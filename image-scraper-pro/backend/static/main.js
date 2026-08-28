@@ -289,66 +289,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ==========================================================================
-    // SCRAPING & STREAMING STATE
+    // SCRAPE — requires local Python backend (Yandex blocks all cloud scrapers)
     // ==========================================================================
-    let isScrapingActive = false;
-    let activeJobId = null;
-    let activePollTimer = null;
-    let scrapeAbortCtrl = null;
-
-    function setScrapingUI(active) {
-        isScrapingActive = active;
-        if (active) {
-            scrapeBtn.classList.add('btn-scraping-active');
-            scrapeBtn.innerHTML = '<span class="btn-text">Stop Scraping</span><i data-lucide="square"></i>';
-        } else {
-            scrapeBtn.classList.remove('btn-scraping-active');
-            scrapeBtn.innerHTML = '<span class="btn-text">Extract Images</span><i data-lucide="zap"></i>';
-        }
-        lucide.createIcons();
-    }
-
-    async function stopActiveScraping() {
-        if (!isScrapingActive) return;
-        if (activePollTimer) {
-            clearInterval(activePollTimer);
-            activePollTimer = null;
-        }
-        if (scrapeAbortCtrl) {
-            scrapeAbortCtrl.abort();
-            scrapeAbortCtrl = null;
-        }
-        if (activeJobId) {
-            const jid = activeJobId;
-            activeJobId = null;
-            try {
-                await fetch(`${BACKEND_URL}/api/scrape/stop`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ job_id: jid }),
-                    signal: AbortSignal.timeout(4000)
-                });
-            } catch(e) {}
-        }
-        setScrapingUI(false);
-        loader.classList.add('hidden');
-        resultsSection.classList.remove('hidden');
-        if (filterSelect.value === 'all') {
-            filteredImages = [...allImages];
-        } else {
-            applyFilter();
-        }
-        imageCount.textContent = `Found ${allImages.length} images (Stopped)`;
-        showToast(`Scraping stopped. Displaying ${allImages.length} collected image(s).`, 'info');
-        lucide.createIcons();
-    }
-
     scrapeBtn.addEventListener('click', async () => {
-        if (isScrapingActive) {
-            await stopActiveScraping();
-            return;
-        }
-
         const url = urlInput.value.trim();
         if (!url) {
             urlInput.focus();
@@ -361,158 +304,75 @@ document.addEventListener('DOMContentLoaded', () => {
             return extractPinterest(url);
         }
 
-        const deepMode = autoscrollToggle.checked;
-        const targetCount = deepMode ? 2000 : 30;
-
-        resultsSection.classList.remove('hidden');
+        resultsSection.classList.add('hidden');
         loader.classList.remove('hidden');
         imageGrid.innerHTML = '';
         allImages = []; filteredImages = [];
         selectedUrls.clear();
         updateSelectionUI();
         countPanel.classList.add('hidden');
-        imageCount.textContent = 'Initializing scraper...';
 
-        loaderMsg.textContent = deepMode 
-            ? '⚡ Scraping Yandex... Streaming up to 2,000 images in real time'
-            : '⚡ Scraping Yandex... Please wait';
+        const deepMode = autoscrollToggle.checked;
+        loaderMsg.textContent = '⚡ Connecting to cloud server (extracting images)…';
 
-        setScrapingUI(true);
-        await checkLocalBackend();
-
-        // ── Stream Mode via /api/scrape/start & /api/scrape/status ──
-        let started = false;
-        try {
-            const startRes = await fetch(`${BACKEND_URL}/api/scrape/start`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
-                signal: AbortSignal.timeout(10000)
-            });
-            if (startRes.ok) {
-                const startData = await startRes.json();
-                if (startData.job_id) {
-                    activeJobId = startData.job_id;
-                    started = true;
-                }
-            }
-        } catch (e) {
-            console.warn('[stream] Start job attempt failed, falling back to direct scrape:', e);
-        }
-
-        if (started && activeJobId) {
-            let offset = 0;
-            activePollTimer = setInterval(async () => {
-                if (!isScrapingActive || !activeJobId) {
-                    clearInterval(activePollTimer);
-                    activePollTimer = null;
-                    return;
-                }
-                try {
-                    const stRes = await fetch(`${BACKEND_URL}/api/scrape/status?job_id=${activeJobId}&since=${offset}`, {
-                        signal: AbortSignal.timeout(6000)
-                    });
-                    if (stRes.ok) {
-                        const stData = await stRes.json();
-                        if (stData.images && stData.images.length > 0) {
-                            const newImgs = stData.images;
-                            const prevLen = allImages.length;
-                            allImages.push(...newImgs);
-                            offset = allImages.length;
-                            if (filterSelect.value === 'all') {
-                                filteredImages = [...allImages];
-                            }
-                            
-                            // Immediately append cards without rebuilding entire DOM
-                            appendCardsToGrid(newImgs, prevLen);
-                            loader.classList.add('hidden');
-                        }
-
-                        const curCount = allImages.length;
-                        const pageNum = stData.page_processed || 1;
-                        if (stData.status === 'running') {
-                            imageCount.textContent = `Found ${curCount} images (Scraping page ${pageNum}...)`;
-                        }
-
-                        if (stData.status === 'completed' || stData.status === 'aborted') {
-                            clearInterval(activePollTimer);
-                            activePollTimer = null;
-                            setScrapingUI(false);
-                            loader.classList.add('hidden');
-                            imageCount.textContent = `Found ${allImages.length} images`;
-                            filteredImages = [...allImages];
-                            if (allImages.length > 0) {
-                                showToast(`Found ${allImages.length} unique images!`, 'success');
-                            } else {
-                                imageGrid.innerHTML = renderEmptyState({
-                                    icon: 'search-x',
-                                    title: 'No Images Found',
-                                    body: `Could not retrieve images from Yandex.<br><br>Please verify your search query and try again.`
-                                });
-                            }
-                            lucide.createIcons();
-                        }
-                    }
-                } catch (pe) {
-                    console.warn('[stream] Poll status warning:', pe);
-                }
-            }, 350);
-            return;
-        }
-
-        // ── Direct Synchronous Fallback ──
-        scrapeAbortCtrl = new AbortController();
         let extracted = [];
         const endpoints = [
             `${BACKEND_URL}/api/scrape`,
             `${LOCAL_API}/api/scrape`,
-            `/api/scrape`
+            `/api/scrape`,
+            `${RENDER_API}/api/scrape`
         ];
         const uniqueEndpoints = [...new Set(endpoints)];
 
-        for (const endpoint of uniqueEndpoints) {
-            try {
-                const res = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, autoscroll: deepMode, max_images: targetCount }),
-                    signal: scrapeAbortCtrl.signal
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.images && data.images.length > 0) {
-                        extracted = data.images;
-                        if (endpoint.startsWith('http')) {
-                            BACKEND_URL = endpoint.replace('/api/scrape', '');
-                            localAvailable = true;
-                            updateStatusBadge();
-                        }
-                        break;
-                    }
-                }
-            } catch (e) {
-                if (e.name === 'AbortError') break;
+        // Retry loop: try up to 3 times to handle Render cold-start wakeups gracefully
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            if (attempt > 1) {
+                loaderMsg.textContent = `⚡ Cloud server waking up, retrying extraction (attempt ${attempt}/3)…`;
+                await new Promise(r => setTimeout(r, 3000));
             }
+
+            for (const endpoint of uniqueEndpoints) {
+                try {
+                    const res = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url, autoscroll: deepMode }),
+                        signal: AbortSignal.timeout(45000)
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.images && data.images.length > 0) {
+                            extracted = data.images;
+                            if (endpoint.startsWith('http')) {
+                                BACKEND_URL = endpoint.replace('/api/scrape', '');
+                                localAvailable = true;
+                                updateStatusBadge();
+                            }
+                            break;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            if (extracted.length > 0) break;
         }
 
-        setScrapingUI(false);
+        allImages = extracted;
+
         loader.classList.add('hidden');
         resultsSection.classList.remove('hidden');
-
-        allImages = extracted;
-        filteredImages = [...allImages];
 
         if (!allImages.length) {
             imageGrid.innerHTML = renderEmptyState({
                 icon: 'search-x',
                 title: 'No Images Found',
-                body: `Could not retrieve images from Yandex.<br><br>Please verify your search query and click <strong>Extract Images</strong> again.`
+                body: `The cloud server took too long to respond.<br><br>Please wait 5 seconds and click <strong>Extract Images</strong> again.`
             });
             imageCount.textContent = '0 images';
-            showToast('No images found', 'error');
+            showToast('Cloud server waking up — please click Extract Images again', 'info');
         } else {
-            imageCount.textContent = `Found ${allImages.length} images`;
-            displayImages(allImages);
+            filterSelect.value = 'all';
+            applyFilter();
             showToast(`Found ${allImages.length} images!`, 'success');
         }
         lucide.createIcons();
@@ -556,7 +416,7 @@ document.addEventListener('DOMContentLoaded', () => {
             countBreakdown.innerHTML = Object.entries(bd).map(([k, v]) =>
                 `<span class="count-chip"><strong>${v}</strong> ${k.toUpperCase()}</span>`
             ).join('') || '<span class="count-chip">No breakdown</span>';
-            countNote.textContent = 'Page 1 only. Enable Deep Scrape for up to 2,000 images.';
+            countNote.textContent = 'Page 1 only. Enable Deep Scrape for 1000+ images.';
             showToast(`${total} images on page 1`, 'success');
         } catch (err) {
             countPanel.classList.remove('hidden');
@@ -619,9 +479,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     selectAllBtn.addEventListener('click', () => {
-        if (!filteredImages.length && allImages.length) {
-            filteredImages = [...allImages];
-        }
         filteredImages.forEach(i => selectedUrls.add(i.url));
         updateSelectionUI();
         document.querySelectorAll('.img-card').forEach(c => c.classList.add('selected'));
@@ -634,16 +491,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================================================
-    // DISPLAY & PROGRESSIVE APPENDING
+    // DISPLAY
     // ==========================================================================
-    function appendCardsToGrid(images, startIndex) {
-        if (!images.length) return;
+    function displayImages(images) {
+        imageGrid.innerHTML = '';
+        if (!images.length) {
+            imageGrid.innerHTML = `<p style="color:var(--text-dim);grid-column:1/-1;text-align:center;padding:3rem;font-weight:600;">No images match this filter.</p>`;
+            return;
+        }
         const frag = document.createDocumentFragment();
         images.forEach((img, idx) => {
-            const actualIdx = startIndex + idx;
             const card = document.createElement('div');
             card.className = `img-card ${selectedUrls.has(img.url) ? 'selected' : ''}`;
-            card.dataset.index = actualIdx;
+            card.dataset.index = idx;
             const safeAlt = (img.alt || 'Image').replace(/"/g, '&quot;');
             card.innerHTML = `
                 <div class="card-select-checkbox" title="Select"><i data-lucide="check"></i></div>
@@ -657,7 +517,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>`;
             card.addEventListener('click', e => {
-                if (e.target.closest('.btn-preview')) { e.stopPropagation(); openLightbox(actualIdx); return; }
+                if (e.target.closest('.btn-preview')) { e.stopPropagation(); openLightbox(idx); return; }
                 e.preventDefault();
                 if (selectedUrls.has(img.url)) { selectedUrls.delete(img.url); card.classList.remove('selected'); }
                 else { selectedUrls.add(img.url); card.classList.add('selected'); }
@@ -667,15 +527,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         imageGrid.appendChild(frag);
         lucide.createIcons();
-    }
-
-    function displayImages(images) {
-        imageGrid.innerHTML = '';
-        if (!images.length) {
-            imageGrid.innerHTML = `<p style="color:var(--text-dim);grid-column:1/-1;text-align:center;padding:3rem;font-weight:600;">No images match this filter.</p>`;
-            return;
-        }
-        appendCardsToGrid(images, 0);
     }
 
     // ==========================================================================
@@ -756,7 +607,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Shared parallel worker runner (avoids function name collision)
-    function runParallel(targets, taskFn, concurrency = 32) {
+    function runParallel(targets, taskFn, concurrency = 6) {
         let pos = 0;
         const worker = async () => {
             while (pos < targets.length && !downloadAborted) {
@@ -817,10 +668,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const targets = selectedUrls.size ? filteredImages.filter(i => selectedUrls.has(i.url)) : filteredImages;
         if (!targets.length) return;
 
-        // ── Mode 1: Backend bulk ZIP — ultra-fast parallel multithreaded engine
-        if (localAvailable) {
-            showModal(`Building ZIP — ${targets.length} images`, 'Downloading in high-speed parallel mode…');
-            logEntry(`Requesting ZIP from high-speed backend (${targets.length} images)…`, 'success');
+        // ── Mode 1: Backend bulk ZIP — only for ≤150 images (free tier 512MB RAM limit)
+        // For larger batches we go straight to in-browser JSZip which handles any size.
+        if (localAvailable && targets.length <= 150) {
+            showModal(`Building ZIP — ${targets.length} images`, 'Sending to local backend…');
+            logEntry(`Requesting ZIP from local backend…`, 'success');
             progressBarFill.classList.add('indeterminate');
 
             try {
