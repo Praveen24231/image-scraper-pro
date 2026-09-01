@@ -85,8 +85,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // This means the app works fully online with zero local setup.
     // ==========================================================================
     const RENDER_API   = 'https://image-scraper-pro.onrender.com';
-    const LOCAL_API    = 'http://localhost:5000';
-    let BACKEND_URL    = RENDER_API;  // default: cloud backend
+    const LOCAL_API    = (typeof window !== 'undefined' && window.location.origin && window.location.origin.startsWith('http'))
+        ? window.location.origin
+        : 'http://localhost:5000';
+    let BACKEND_URL    = LOCAL_API;
     let localAvailable = false;
     let localCheckTs   = 0;
     const LOCAL_CHECK_TTL = 60000; // 60s cache
@@ -755,6 +757,21 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     }
 
+    function triggerBrowserDownload(blobOrUrl, filename) {
+        const isBlob = (typeof Blob !== 'undefined') && (blobOrUrl instanceof Blob);
+        const blobUrl = isBlob ? URL.createObjectURL(blobOrUrl) : blobOrUrl;
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            if (a.parentNode) a.parentNode.removeChild(a);
+            if (isBlob) URL.revokeObjectURL(blobUrl);
+        }, 60000);
+    }
+
     // Shared parallel worker runner (avoids function name collision)
     function runParallel(targets, taskFn, concurrency = 32) {
         let pos = 0;
@@ -787,10 +804,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 bytes += blob.size;
                 let ext = img.url.split('.').pop().split('?')[0].toLowerCase();
                 if (!['jpg','jpeg','png','webp','gif','avif'].includes(ext)) ext = 'jpg';
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = `img_${String(i + 1).padStart(4, '0')}.${ext}`;
-                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+                triggerBrowserDownload(blob, `img_${String(i + 1).padStart(4, '0')}.${ext}`);
                 ok++;
                 logEntry(`✔ img_${i+1} (${(blob.size/1024).toFixed(1)} KB)`, 'success');
             } catch(e) {
@@ -835,10 +849,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 updateStats(90, '—', 'Packaging…');
                 const blob = await res.blob();
                 updateStats(100, '—', 'Done');
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
-                document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+                triggerBrowserDownload(blob, `yandex_images_${Date.now().toString().slice(-6)}.zip`);
                 const sizeMB = (blob.size / 1048576).toFixed(2);
                 logEntry(`✅ ZIP downloaded: ${sizeMB} MB`, 'success');
                 doneModal(`ZIP saved — ${sizeMB} MB (${targets.length} images)`);
@@ -915,10 +926,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const content = await zip.generateAsync({ type: 'blob' });
             progressBarFill.classList.remove('indeterminate');
             updateStats(100, '—', 'Done');
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(content);
-            a.download = `yandex_images_${Date.now().toString().slice(-6)}.zip`;
-            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+            triggerBrowserDownload(content, `yandex_images_${Date.now().toString().slice(-6)}.zip`);
             const sizeMB = (content.size / 1048576).toFixed(2);
             logEntry(`✅ ZIP: ${sizeMB} MB`, 'success');
             doneModal(`ZIP saved — ${sizeMB} MB (${ok} images)`);
@@ -987,10 +995,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('Fetching image…', 'info', 2000);
         const blob = await fetchImageBlob(img.url);
         if (blob) {
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `yandex_${Date.now()}.jpg`;
-            document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+            triggerBrowserDownload(blob, `yandex_${Date.now()}.jpg`);
             showToast('Image saved!', 'success');
         } else { window.open(img.url, '_blank'); }
     });
